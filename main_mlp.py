@@ -28,14 +28,8 @@ from util import TwoCropTransform, AverageMeter
 from util import adjust_learning_rate, warmup_learning_rate
 from util import set_optimizer, save_model, load_model
 from networks.resnet_big import SupConResNet
+from networks.trashcan import Trashcan
 from losses_negative_only import SupConLoss
-
-
-'''try:
-    import apex
-    from apex import amp, optimizers
-except ImportError:
-    pass'''
 
 
 def parse_option():
@@ -361,10 +355,6 @@ def set_model(opt):
     model = SupConResNet(name=opt.model)
     criterion = SupConLoss(temperature=opt.temp)
 
-    # enable synchronized Batch Normalization
-    '''if opt.syncBN:
-        model = apex.parallel.convert_syncbn_model(model)'''
-
     if torch.cuda.is_available():
         if torch.cuda.device_count() > 1:
             model.encoder = torch.nn.DataParallel(model.encoder)
@@ -409,7 +399,11 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
 
         # IRD (current)
         if opt.target_task > 0:
-            features1_prev_task = features
+            #adding an MLP that will be discarded after that epoch, only for computing IRD
+            mlp = Trashcan()
+            mlp_optimizer = torch.optim.Adam(mlp.parameters(), lr=1e-3)
+            features1_prev_task = mlp(features)
+            #features1_prev_task = features #old version
 
             features1_sim = torch.div(torch.matmul(features1_prev_task, features1_prev_task.T), opt.current_temp)
             logits_mask = torch.scatter(
@@ -448,8 +442,13 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
 
         # SGD
         optimizer.zero_grad()
+        #SGD of Trashcan
+        if opt.target_task > 0:
+            mlp_optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        if opt.target_task > 0:
+            mlp_optimizer.step()
 
 
         # measure elapsed time
@@ -465,6 +464,10 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
                    epoch, idx + 1, len(train_loader), batch_time=batch_time,
                    data_time=data_time, loss=losses, distill=distill))
             sys.stdout.flush()
+
+        #Taking out the trash
+        del mlp
+        torch.cuda.empty_cache()  # Free up GPU memory
 
     return losses.avg, model2
 

@@ -78,7 +78,8 @@ def parse_option():
     opt = parser.parse_args()
 
     # set the path according to the environment
-    opt.data_folder = '~/data/'
+    #opt.data_folder = '~/data/'
+    opt.data_folder = '/data/alicmabi11/datasets'
 
     opt.tb_folder = os.path.join(opt.ckpt, 'tensorboard', 'linear_eval')
 
