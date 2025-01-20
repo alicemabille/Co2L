@@ -365,6 +365,22 @@ def set_model(opt):
     return model, criterion
 
 
+def create_mlp(input_dim, hidden_dim, output_dim):
+    model = nn.Sequential(
+        nn.Linear(input_dim, hidden_dim),  # Layer 1: Linear (input_dim -> hidden_dim)
+        nn.ReLU(),                         # Activation after Layer 1
+        nn.Linear(hidden_dim, output_dim)  # Layer 2: Linear (hidden_dim -> output_dim)
+    )
+
+    if torch.cuda.is_available():
+        if torch.cuda.device_count() > 1:
+            model.encoder = torch.nn.DataParallel(model.encoder)
+        model = model.cuda()
+        cudnn.benchmark = True
+
+    return model
+
+
 def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
 
 
@@ -400,7 +416,7 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
         # IRD (current)
         if opt.target_task > 0:
             #adding an MLP that will be discarded after that epoch, only for computing IRD
-            mlp = Trashcan()
+            mlp = create_mlp(128, 128, 128)
             mlp_optimizer = torch.optim.Adam(mlp.parameters(), lr=1e-3)
             features1_prev_task = mlp(features)
             #features1_prev_task = features #old version
