@@ -130,9 +130,9 @@ def parse_option():
     # set the path according to the environment
     if opt.data_folder is None:
         opt.data_folder = '~/data/'
-    opt.model_path = './save_{}_{}/{}_models'.format(opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.tb_path = './save_{}_{}/{}_tensorboard'.format(opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.log_path = './save_{}_{}/logs'.format(opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.model_path = './save_extendedIRD_{}_{}/{}_models'.format(opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.tb_path = './save_extendedIRD_{}_{}/{}_tensorboard'.format(opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.log_path = './save_extendedIRD_{}_{}/logs'.format(opt.replay_policy, opt.mem_size, opt.dataset)
 
     iterations = opt.lr_decay_epochs.split(',')
     opt.lr_decay_epochs = list([])
@@ -465,9 +465,10 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
                    data_time=data_time, loss=losses, distill=distill))
             sys.stdout.flush()
 
-        #Taking out the trash
-        del mlp
-        torch.cuda.empty_cache()  # Free up GPU memory
+        if opt.target_task > 0:
+            #Taking out the trash
+            del mlp
+            torch.cuda.empty_cache()  # Free up GPU memory
 
     return losses.avg, model2
 
