@@ -136,9 +136,13 @@ def parse_option():
     # set the path according to the environment
     if opt.data_folder is None:
         opt.data_folder = '~/data/'
-    opt.model_path = './save_{}_{}/{}_models'.format(opt.replay_policy, opt.mem_size, opt.dataset)
+    """opt.model_path = './save_{}_{}/{}_models'.format(opt.replay_policy, opt.mem_size, opt.dataset)
     opt.tb_path = './save_{}_{}/{}_tensorboard'.format(opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.log_path = './save_{}_{}/logs'.format(opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.log_path = './save_{}_{}/logs'.format(opt.replay_policy, opt.mem_size, opt.dataset)"""
+
+    opt.model_path = '{}/save_{}_{}/{}_models'.format(opt.data_folder , opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.tb_path = '{}/save_{}_{}/{}_tensorboard'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.log_path = '{}/save_{}_{}/logs'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
 
     iterations = opt.lr_decay_epochs.split(',')
     opt.lr_decay_epochs = list([])
@@ -208,14 +212,14 @@ def set_replay_samples(opt, model, prev_indices=None):
 
     if opt.dataset == 'cifar10':
         subset_indices = []
-        val_dataset = datasets.CIFAR10(root=opt.data_folder,
+        val_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
                                          transform=val_transform,
                                          download=True)
         val_targets = np.array(val_dataset.targets)
 
     elif opt.dataset == 'tiny-imagenet':
         subset_indices = []
-        val_dataset = TinyImagenet(root=opt.data_folder,
+        val_dataset = TinyImagenet(root='{}/datasets'.format(opt.data_folder),
                                     transform=val_transform,
                                     download=True)
         val_targets = val_dataset.targets
@@ -312,7 +316,7 @@ def set_loader(opt, replay_indices):
 
     if opt.dataset == 'cifar10':
         subset_indices = []
-        _train_dataset = datasets.CIFAR10(root=opt.data_folder,
+        _train_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
                                          transform=TwoCropTransform(train_transform),
                                          download=True)
         for tc in target_classes:
@@ -328,7 +332,7 @@ def set_loader(opt, replay_indices):
 
     elif opt.dataset == 'tiny-imagenet':
         subset_indices = []
-        _train_dataset = TinyImagenet(root=opt.data_folder,
+        _train_dataset = TinyImagenet(root='{}/datasets'.format(opt.data_folder),
                                           transform=TwoCropTransform(train_transform),
                                           download=True)
         for tc in target_classes:

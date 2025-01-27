@@ -28,12 +28,13 @@ from util import TwoCropTransform, AverageMeter
 from util import adjust_learning_rate, warmup_learning_rate
 from util import set_optimizer, save_model, load_model
 from networks.resnet_big import SupConResNet
-from networks.trashcan import Trashcan
 from losses_negative_only import SupConLoss
 
 
 def parse_option():
     parser = argparse.ArgumentParser('argument for training')
+
+    parser.add_argument('--mlp_hidden_dim', type=int, default=256)
 
     parser.add_argument('--target_task', type=int, default=0)
 
@@ -130,9 +131,13 @@ def parse_option():
     # set the path according to the environment
     if opt.data_folder is None:
         opt.data_folder = '~/data/'
-    opt.model_path = './save_extendedIRD_{}_{}/{}_models'.format(opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.tb_path = './save_extendedIRD_{}_{}/{}_tensorboard'.format(opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.log_path = './save_extendedIRD_{}_{}/logs'.format(opt.replay_policy, opt.mem_size, opt.dataset)
+    
+    #opt.model_path = './save_extendedIRD_{}_{}/{}_models'.format(opt.replay_policy, opt.mem_size, opt.dataset)
+    #opt.tb_path = './save_extendedIRD_{}_{}/{}_tensorboard'.format(opt.replay_policy, opt.mem_size, opt.dataset)
+    #opt.log_path = './save_extendedIRD_{}_{}/logs'.format(opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.model_path = '{}/save_extendedIRD_{}_{}/{}_models'.format(opt.data_folder , opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.tb_path = '{}/save_extendedIRD_{}_{}/{}_tensorboard'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.log_path = '{}/save_extendedIRD_{}_{}/logs'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
 
     iterations = opt.lr_decay_epochs.split(',')
     opt.lr_decay_epochs = list([])
@@ -202,14 +207,14 @@ def set_replay_samples(opt, model, prev_indices=None):
 
     if opt.dataset == 'cifar10':
         subset_indices = []
-        val_dataset = datasets.CIFAR10(root=opt.data_folder,
+        val_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
                                          transform=val_transform,
                                          download=True)
         val_targets = np.array(val_dataset.targets)
 
     elif opt.dataset == 'tiny-imagenet':
         subset_indices = []
-        val_dataset = TinyImagenet(root=opt.data_folder,
+        val_dataset = TinyImagenet(root='{}/datasets'.format(opt.data_folder),
                                     transform=val_transform,
                                     download=True)
         val_targets = val_dataset.targets
@@ -306,7 +311,7 @@ def set_loader(opt, replay_indices):
 
     if opt.dataset == 'cifar10':
         subset_indices = []
-        _train_dataset = datasets.CIFAR10(root=opt.data_folder,
+        _train_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
                                          transform=TwoCropTransform(train_transform),
                                          download=True)
         for tc in target_classes:
@@ -322,7 +327,7 @@ def set_loader(opt, replay_indices):
 
     elif opt.dataset == 'tiny-imagenet':
         subset_indices = []
-        _train_dataset = TinyImagenet(root=opt.data_folder,
+        _train_dataset = TinyImagenet(root='{}/datasets'.format(opt.data_folder),
                                           transform=TwoCropTransform(train_transform),
                                           download=True)
         for tc in target_classes:
@@ -365,11 +370,11 @@ def set_model(opt):
     return model, criterion
 
 
-def create_mlp(input_dim, hidden_dim, output_dim):
+def create_mlp(opt):
     model = nn.Sequential(
-        nn.Linear(input_dim, hidden_dim),  # Layer 1: Linear (input_dim -> hidden_dim)
-        nn.ReLU(),                         # Activation after Layer 1
-        nn.Linear(hidden_dim, output_dim)  # Layer 2: Linear (hidden_dim -> output_dim)
+        nn.Linear(128, opt.mlp_hidden_dim),  # Layer 1: Linear (input_dim -> hidden_dim)
+        nn.ReLU(),                         # tester autre fct activation
+        nn.Linear(opt.mlp_hidden_dim, 128)  # Layer 2: Linear (hidden_dim -> output_dim)
     )
 
     if torch.cuda.is_available():
@@ -416,7 +421,7 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
         # IRD (current)
         if opt.target_task > 0:
             #adding an MLP that will be discarded after that epoch, only for computing IRD
-            mlp = create_mlp(128, 128, 128)
+            mlp = create_mlp(opt)
             mlp_optimizer = torch.optim.Adam(mlp.parameters(), lr=1e-3)
             features1_prev_task = mlp(features)
             #features1_prev_task = features #old version
