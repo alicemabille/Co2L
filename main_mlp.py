@@ -186,10 +186,10 @@ def parse_option():
     return opt
 
 
-def set_replay_samples(opt, model, prev_indices=None):
+def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=None):
 
     is_training = model.training
-    model.eval()
+    model.eval() #set the model to evaluation mode
 
     class IdxDataset(Dataset):
         def __init__(self, dataset, indices):
@@ -276,7 +276,7 @@ def set_replay_samples(opt, model, prev_indices=None):
     return prev_indices + selected_observed_indices
 
 
-def set_loader(opt, replay_indices):
+def set_loader(opt:argparse.Namespace, replay_indices) :
     # construct data loader
     if opt.dataset == 'cifar10':
         mean = (0.4914, 0.4822, 0.4465)
@@ -312,7 +312,7 @@ def set_loader(opt, replay_indices):
     if opt.dataset == 'cifar10':
         subset_indices = []
         _train_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
-                                         transform=TwoCropTransform(train_transform),
+                                         transform=TwoCropTransform(train_transform), #To enjoy the benefits of contrastive representation learning, each sample is augmented into two views.
                                          download=True)
         for tc in target_classes:
             target_class_indices = np.where(np.array(_train_dataset.targets) == tc)[0]
@@ -356,7 +356,7 @@ def set_loader(opt, replay_indices):
 
 
 
-def set_model(opt):
+def set_model(opt:argparse.Namespace) -> tuple[SupConResNet, SupConLoss]:
     model = SupConResNet(name=opt.model)
     criterion = SupConLoss(temperature=opt.temp)
 
@@ -370,7 +370,7 @@ def set_model(opt):
     return model, criterion
 
 
-def create_mlp(opt):
+def create_mlp(opt:argparse.Namespace) -> nn.Module:
     model = nn.Sequential(
         nn.Linear(128, opt.mlp_hidden_dim),  # Layer 1: Linear (input_dim -> hidden_dim)
         nn.ReLU(),                         # tester autre fct activation
@@ -386,10 +386,17 @@ def create_mlp(opt):
     return model
 
 
-def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
+def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, task_model:nn.Module, model2:nn.Module, criterion:SupConLoss, optimizer:torch.optim.SGD, epoch:int, opt:argparse.Namespace):
+    """
+    one epoch training
 
-
-    """one epoch training"""
+    train_loader : union of current task samples and buffered samples, without any oversampling.
+    model : the new model to train (this function calls .train() on it)
+    model2 : frozen previous model, in test mode (previously called .eval() on it)
+    criterion : 
+    optimizer : stochastic gradient descent for the model's parameters, with specified learning rate, momentum and weight decay
+    epoch : specifies which epoch this is, to calculate a warm-up learning rate if the epoch is in warm-up phase
+    """
     model.train()
 
     batch_time = AverageMeter()
@@ -398,6 +405,8 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
     distill = AverageMeter()
 
     end = time.time()
+
+    #The mini-batch is drawn from this dataset, where each sample is independently drawn with equal probability.
     for idx, (images, labels) in enumerate(train_loader):
         data_time.update(time.time() - end)
 
@@ -415,16 +424,15 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
         # warm-up learning rate
         warmup_learning_rate(opt, epoch, idx, len(train_loader), optimizer)
 
-        # compute loss
+        # compute loss (forward pass)
         features, encoded = model(images, return_feat=True)
 
         # IRD (current)
         if opt.target_task > 0:
-            #adding an MLP that will be discarded after that epoch, only for computing IRD
-            mlp = create_mlp(opt)
-            mlp_optimizer = torch.optim.Adam(mlp.parameters(), lr=1e-3)
-            features1_prev_task = mlp(features)
-            #features1_prev_task = features #old version
+            #features1_prev_task = features
+
+            #using task_model only to compute current IRD loss
+            features1_prev_task = task_model(images)
 
             features1_sim = torch.div(torch.matmul(features1_prev_task, features1_prev_task.T), opt.current_temp)
             logits_mask = torch.scatter(
@@ -437,15 +445,16 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
             features1_sim = features1_sim - logits_max1.detach()
             row_size = features1_sim.size(0)
             logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
+            del features1_prev_task
 
-        # Asym SupCon
+        # Asym SupCon. asymmetrically modified version of the SupCon objective. We only use current task samples as anchors; past task samples from the memory buffer will only be used as negative samples.
         f1, f2 = torch.split(features, [bsz, bsz], dim=0)
         features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
         loss = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
 
         # IRD (past)
         if opt.target_task > 0:
-            with torch.no_grad():
+            with torch.no_grad(): #disables gradient calculation for model2 : frozen previous model, in eval mode
                 features2_prev_task = model2(images)
 
                 features2_sim = torch.div(torch.matmul(features2_prev_task, features2_prev_task.T), opt.past_temp)
@@ -453,6 +462,7 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
                 features2_sim = features2_sim - logits_max2.detach()
                 logits2 = torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)) /  torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
 
+                del features2_prev_task
 
             loss_distill = (-logits2 * torch.log(logits1)).sum(1).mean()
             loss += opt.distill_power * loss_distill
@@ -463,13 +473,8 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
 
         # SGD
         optimizer.zero_grad()
-        #SGD of Trashcan
-        if opt.target_task > 0:
-            mlp_optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        if opt.target_task > 0:
-            mlp_optimizer.step()
 
 
         # measure elapsed time
@@ -486,11 +491,6 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
                    data_time=data_time, loss=losses, distill=distill))
             sys.stdout.flush()
 
-        if opt.target_task > 0:
-            #Taking out the trash
-            del mlp
-            torch.cuda.empty_cache()  # Free up GPU memory
-
     return losses.avg, model2
 
 
@@ -502,9 +502,10 @@ def main():
     # build model and criterion
     model, criterion = set_model(opt)
     model2, _ = set_model(opt)
-    model2.eval()
+    model2.eval() #frozen old model
 
     # build optimizer
+    #setting SGD for new model : creates an optim.SGD object with the model's parameters and learning rate, momentum and weight decay specified in args
     optimizer = set_optimizer(opt, model)
 
     replay_indices = None
@@ -525,6 +526,7 @@ def main():
 
     original_epochs = opt.epochs
 
+    # setting task and epochs number
     if opt.end_task is not None:
         if opt.resume_target_task is not None:
             assert opt.end_task > opt.resume_target_task
@@ -532,10 +534,11 @@ def main():
     else:
         opt.end_task = opt.n_cls // opt.cls_per_task
 
+    #training for all indicated tasks
     for target_task in range(0 if opt.resume_target_task is None else opt.resume_target_task+1, opt.end_task):
 
         opt.target_task = target_task
-        model2 = copy.deepcopy(model)
+        model2 = copy.deepcopy(model) #frozen old model
 
         print('Start Training current task {}'.format(opt.target_task))
 
@@ -553,7 +556,22 @@ def main():
           os.path.join(opt.log_folder, 'subset_indices_{policy}_{target_task}.npy'.format(policy=opt.replay_policy ,target_task=target_task)),
           np.array(subset_indices))
 
-
+        #adding an MLP to learn features too specific for this task, then discard it when learning a new task
+        mlp = create_mlp(opt)
+        #mlp_optimizer = torch.optim.Adam(mlp.parameters(), lr=1e-3)
+        if opt.target_task > 0:
+            task_model = nn.Sequential(
+                model,
+                mlp #not sure which optimizer this will use
+            )
+            """task_optimizer = torch.optim.SGD(
+                task_model.parameters(),
+                lr=opt.learning_rate,
+                momentum=opt.momentum,
+                weight_decay=opt.weight_decay)"""
+        else :
+            task_model = None
+            
 
         # training routine
         if target_task == 0 and opt.start_epoch is not None:
@@ -561,19 +579,27 @@ def main():
         else:
             opt.epochs = original_epochs
 
+        #training for a given number of epochs
         for epoch in range(1, opt.epochs + 1):
 
             adjust_learning_rate(opt, optimizer, epoch)
 
             # train for one epoch
             time1 = time.time()
-            loss, model2 = train(train_loader, model, model2, criterion, optimizer, epoch, opt)
+            loss, model2 = train(train_loader, model, task_model, model2, criterion, optimizer, epoch, opt) #model2 is in eval mode so not modified here.
             time2 = time.time()
             print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
             # tensorboard logger
             logger.log_value('loss_{target_task}'.format(target_task=target_task), loss, epoch)
             logger.log_value('learning_rate_{target_task}'.format(target_task=target_task), optimizer.param_groups[0]['lr'], epoch)
+
+        #KEEP MODEL AND DISCARD MLP
+        if opt.target_task > 0:
+            #Taking out the trash : discarding mlp
+            del mlp
+            del task_model
+            torch.cuda.empty_cache()  # Free up GPU memory
 
         # save the last model
         save_file = os.path.join(
