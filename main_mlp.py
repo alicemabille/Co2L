@@ -386,12 +386,13 @@ def create_mlp(opt:argparse.Namespace) -> nn.Module:
     return model
 
 
-def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, task_model:nn.Module, model2:nn.Module, criterion:SupConLoss, optimizer:torch.optim.SGD, epoch:int, opt:argparse.Namespace):
+def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Module, model2:nn.Module, criterion:SupConLoss, optimizer:torch.optim.SGD, mlp_optimizer:torch.optim.Optimizer, epoch:int, opt:argparse.Namespace):
     """
     one epoch training
 
     train_loader : union of current task samples and buffered samples, without any oversampling.
     model : the new model to train (this function calls .train() on it)
+    mlp : extension of current model to only use in computing IRD, and to discard at the end of learning current task.
     model2 : frozen previous model, in test mode (previously called .eval() on it)
     criterion : 
     optimizer : stochastic gradient descent for the model's parameters, with specified learning rate, momentum and weight decay
@@ -429,12 +430,15 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, task_model:
 
         # IRD (current)
         if opt.target_task > 0:
-            #features1_prev_task = features
+            features1 = features
+            print("Current features : max = {}\tmin = {}\tshape = {}".format(torch.max(features1), torch.min(features1), features1.size()))
 
             #using task_model only to compute current IRD loss
-            features1_prev_task = task_model(images)
+            features1_prev_task = mlp(features1)
+            print("MLP output : max = {}\tmin = {}\tshape = {}".format(torch.max(features1_prev_task), torch.min(features1_prev_task), features1_prev_task.size()))
 
             features1_sim = torch.div(torch.matmul(features1_prev_task, features1_prev_task.T), opt.current_temp)
+            print("similarities : max = {}\tmin = {}\tshape = {}".format(torch.max(features1_sim), torch.min(features1_sim), features1_sim.size()))
             logits_mask = torch.scatter(
                 torch.ones_like(features1_sim),
                 1,
@@ -442,10 +446,12 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, task_model:
                 0
             )
             logits_max1, _ = torch.max(features1_sim * logits_mask, dim=1, keepdim=True)
-            features1_sim = features1_sim - logits_max1.detach()
+            features1_sim = features1_sim - logits_max1.detach() #why substract max similarity ?
             row_size = features1_sim.size(0)
             logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
             del features1_prev_task
+            print("logits1 for IRD loss : max = {}\tmin = {}\tshape = {}".format(torch.max(logits1), torch.min(logits1), logits1.size()))
+            
 
         # Asym SupCon. asymmetrically modified version of the SupCon objective. We only use current task samples as anchors; past task samples from the memory buffer will only be used as negative samples.
         f1, f2 = torch.split(features, [bsz, bsz], dim=0)
@@ -465,6 +471,14 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, task_model:
                 del features2_prev_task
 
             loss_distill = (-logits2 * torch.log(logits1)).sum(1).mean()
+            print("IRD loss : ", loss_distill)
+            """
+            Current features : max = 0.26064956188201904    min = -0.2949966788291931       shape = torch.Size([1024, 128])
+            MLP output : max = 5.213999271392822    min = -5.823997497558594        shape = torch.Size([1024, 128])
+            similarities : max = 3409.20703125      min = -304.48486328125  shape = torch.Size([1024, 1024])
+            logits1 for IRD loss : max = 1.0        min = 0.0       shape = torch.Size([1024, 1023])
+            IRD loss :  tensor(nan, device='cuda:0', grad_fn=<MeanBackward0>)
+            """
             loss += opt.distill_power * loss_distill
             distill.update(loss_distill.item(), bsz)
 
@@ -473,8 +487,12 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, task_model:
 
         # SGD
         optimizer.zero_grad()
+        if opt.target_task > 0:
+            mlp_optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        if opt.target_task > 0:
+            mlp_optimizer.step()
 
 
         # measure elapsed time
@@ -556,21 +574,23 @@ def main():
           os.path.join(opt.log_folder, 'subset_indices_{policy}_{target_task}.npy'.format(policy=opt.replay_policy ,target_task=target_task)),
           np.array(subset_indices))
 
-        #adding an MLP to learn features too specific for this task, then discard it when learning a new task
-        mlp = create_mlp(opt)
-        #mlp_optimizer = torch.optim.Adam(mlp.parameters(), lr=1e-3)
         if opt.target_task > 0:
-            task_model = nn.Sequential(
+            #adding an MLP to learn features too specific for this task, then discard it when learning a new task
+            mlp = create_mlp(opt)
+            mlp_optimizer = set_optimizer(opt, mlp)
+            """task_model = nn.Sequential(
                 model,
                 mlp #not sure which optimizer this will use
-            )
+            )"""
             """task_optimizer = torch.optim.SGD(
                 task_model.parameters(),
                 lr=opt.learning_rate,
                 momentum=opt.momentum,
                 weight_decay=opt.weight_decay)"""
         else :
-            task_model = None
+            #task_model = None
+            mlp = None
+            mlp_optimizer = None
             
 
         # training routine
@@ -586,7 +606,7 @@ def main():
 
             # train for one epoch
             time1 = time.time()
-            loss, model2 = train(train_loader, model, task_model, model2, criterion, optimizer, epoch, opt) #model2 is in eval mode so not modified here.
+            loss, model2 = train(train_loader, model, mlp, model2, criterion, optimizer, mlp_optimizer, epoch, opt) #model2 is in eval mode so not modified here.
             time2 = time.time()
             print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
@@ -598,8 +618,9 @@ def main():
         if opt.target_task > 0:
             #Taking out the trash : discarding mlp
             del mlp
-            del task_model
+            #del task_model
             torch.cuda.empty_cache()  # Free up GPU memory
+
 
         # save the last model
         save_file = os.path.join(
