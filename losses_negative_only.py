@@ -97,4 +97,5 @@ class SupConLoss(nn.Module):
             raise ValueError('loss reduction not supported: {}'.
                              format(reduction))
 
-        return loss
+        return loss, mean_log_prob_pos #TODO : choose what loss values to return for buffer management
+    #TODO : find what samples correspond to mean_log_prob_pos
