@@ -137,6 +137,7 @@ def set_model(opt, cls_num_list):
     if torch.cuda.is_available():
         if torch.cuda.device_count() > 1:
             model.encoder = torch.nn.DataParallel(model.encoder)
+        #If the model was saved using torch.nn.DataParallel (model = torch.nn.DataParallel(model)) and you are now loading it without DataParallel, PyTorch adds a "module." prefix to the layer names during saving.
         else:
             new_state_dict = {}
             for k, v in state_dict.items():

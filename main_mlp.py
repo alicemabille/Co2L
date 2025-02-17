@@ -188,9 +188,10 @@ def parse_option():
 
 def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=None):
 
-    is_training = model.training
+    is_training = model.training # ?
     model.eval() #set the model to evaluation mode
 
+    # ?
     class IdxDataset(Dataset):
         def __init__(self, dataset, indices):
             self.dataset = dataset
@@ -205,6 +206,8 @@ def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=N
         transforms.ToTensor(),
     ])
 
+    ####################### DATASETS ###########################
+    # fetch dataset
     if opt.dataset == 'cifar10':
         subset_indices = []
         val_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
@@ -221,19 +224,31 @@ def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=N
 
     else:
         raise ValueError('dataset not supported: {}'.format(opt.dataset))
+    ##############################################################
 
+
+    # select previous samples and add to buffer
     if prev_indices is None:
         prev_indices = []
         observed_classes = list(range(0, opt.target_task*opt.cls_per_task))
     else:
+        # compute amount of buffer memory we can currently modify, as all previous tasks have evenly distributed samples in the buffer
         shrink_size = ((opt.target_task - 1) * opt.mem_size / opt.target_task)
-        if len(prev_indices) > 0:
-            unique_cls = np.unique(val_targets[prev_indices])
-            _prev_indices = prev_indices
-            prev_indices = []
 
+        if len(prev_indices) > 0:
+            # find unique target classes of all buffered samples
+            unique_cls = np.unique(val_targets[prev_indices])
+            # store previous indices
+            _prev_indices = prev_indices
+
+            # reset prev_indices array and add selected samples
+            prev_indices = []
             for c in unique_cls:
+                # mask for choosing past samples that belong to current class c
+                # only has 0s and 1s : mask.sum() will give the number of past samples that belong to class c
                 mask = val_targets[_prev_indices] == c
+
+                # compute amount of buffer memory for each class
                 size_for_c = shrink_size / len(unique_cls)
                 p = size_for_c - (shrink_size // len(unique_cls))
                 if random.random() < p:
@@ -241,11 +256,13 @@ def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=N
                 else:
                     size_for_c = math.floor(size_for_c)
 
+                # euh TODO commenter ça
                 prev_indices += torch.tensor(_prev_indices)[mask][torch.randperm(mask.sum())[:size_for_c]].tolist()
 
             print(np.unique(val_targets[prev_indices], return_counts=True))
         observed_classes = list(range(max(opt.target_task-1, 0)*opt.cls_per_task, (opt.target_task)*opt.cls_per_task))
 
+    # i don't even know how this could happen
     if len(observed_classes) == 0:
         return prev_indices
 
@@ -277,7 +294,10 @@ def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=N
 
 
 def set_loader(opt:argparse.Namespace, replay_indices) :
-    # construct data loader
+    """
+    construct data loader
+
+    """
     if opt.dataset == 'cifar10':
         mean = (0.4914, 0.4822, 0.4465)
         std = (0.2023, 0.1994, 0.2010)
@@ -290,7 +310,7 @@ def set_loader(opt:argparse.Namespace, replay_indices) :
     else:
         raise ValueError('dataset not supported: {}'.format(opt.dataset))
 
-
+    ######################## DATA AUGMENTATION #################################
     normalize = transforms.Normalize(mean=mean, std=std)
     train_transform = transforms.Compose([
         transforms.Resize(size=(opt.size, opt.size)),
@@ -304,11 +324,13 @@ def set_loader(opt:argparse.Namespace, replay_indices) :
         transforms.ToTensor(),
         normalize,
     ])
-
+    ###########################################################################
 
     target_classes = list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task))
     print(target_classes)
 
+    ##################### CONTINUAL LEARNING DATASETS ######################################
+    # divide dataset into different tasks for continual learning
     if opt.dataset == 'cifar10':
         subset_indices = []
         _train_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
@@ -346,6 +368,8 @@ def set_loader(opt:argparse.Namespace, replay_indices) :
                                             transform=TwoCropTransform(train_transform))
     else:
         raise ValueError(opt.dataset)
+    ###################################################################################################
+
 
     train_sampler = None
     train_loader = torch.utils.data.DataLoader(
@@ -357,6 +381,10 @@ def set_loader(opt:argparse.Namespace, replay_indices) :
 
 
 def set_model(opt:argparse.Namespace) -> tuple[SupConResNet, SupConLoss]:
+    """
+    Sets continual learning SupConResNet model that uses SupCon loss.
+    Uses DataParallel for the encoder : be careful about loading model when DataParallel is not available (should remove ".module" in state_dict)
+    """
     model = SupConResNet(name=opt.model)
     criterion = SupConLoss(temperature=opt.temp)
 
@@ -371,19 +399,21 @@ def set_model(opt:argparse.Namespace) -> tuple[SupConResNet, SupConLoss]:
 
 
 def create_mlp(opt:argparse.Namespace) -> nn.Module:
+    """
+    Creates a simple Multi Layer Perceptron to 
+    """
     model = nn.Sequential(
         nn.Linear(128, opt.mlp_hidden_dim),  # Layer 1: Linear (input_dim -> hidden_dim)
         nn.ReLU(),                         # tester autre fct activation
         nn.Linear(opt.mlp_hidden_dim, 128)  # Layer 2: Linear (hidden_dim -> output_dim)
     )
+    criterion = torch.nn.CrossEntropyLoss()
 
     if torch.cuda.is_available():
-        if torch.cuda.device_count() > 1:
-            model.encoder = torch.nn.DataParallel(model.encoder)
         model = model.cuda()
         cudnn.benchmark = True
 
-    return model
+    return model, criterion
 
 
 def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Module, model2:nn.Module, criterion:SupConLoss, optimizer:torch.optim.SGD, mlp_optimizer:torch.optim.Optimizer, epoch:int, opt:argparse.Namespace):
@@ -431,14 +461,14 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Modu
         # IRD (current)
         if opt.target_task > 0:
             features1 = features
-            print("Current features : max = {}\tmin = {}\tshape = {}".format(torch.max(features1), torch.min(features1), features1.size()))
+            #print("Current features : max = {}\tmin = {}\tshape = {}".format(torch.max(features1), torch.min(features1), features1.size()))
 
             #using task_model only to compute current IRD loss
             features1_prev_task = mlp(features1)
-            print("MLP output : max = {}\tmin = {}\tshape = {}".format(torch.max(features1_prev_task), torch.min(features1_prev_task), features1_prev_task.size()))
+            #print("MLP output : max = {}\tmin = {}\tshape = {}".format(torch.max(features1_prev_task), torch.min(features1_prev_task), features1_prev_task.size()))
 
             features1_sim = torch.div(torch.matmul(features1_prev_task, features1_prev_task.T), opt.current_temp)
-            print("similarities : max = {}\tmin = {}\tshape = {}".format(torch.max(features1_sim), torch.min(features1_sim), features1_sim.size()))
+            #print("similarities : max = {}\tmin = {}\tshape = {}".format(torch.max(features1_sim), torch.min(features1_sim), features1_sim.size()))
             logits_mask = torch.scatter(
                 torch.ones_like(features1_sim),
                 1,
@@ -448,9 +478,9 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Modu
             logits_max1, _ = torch.max(features1_sim * logits_mask, dim=1, keepdim=True)
             features1_sim = features1_sim - logits_max1.detach() #why substract max similarity ?
             row_size = features1_sim.size(0)
-            logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
-            del features1_prev_task
-            print("logits1 for IRD loss : max = {}\tmin = {}\tshape = {}".format(torch.max(logits1), torch.min(logits1), logits1.size()))
+            logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True) + 1e-20 #adding a really small value to ensure it's not 0 because log(0) = NaN
+            #del features1_prev_task
+            #print("logits1 for IRD loss : max = {}\tmin = {}\tshape = {}".format(torch.max(logits1), torch.min(logits1), logits1.size()))
             
 
         # Asym SupCon. asymmetrically modified version of the SupCon objective. We only use current task samples as anchors; past task samples from the memory buffer will only be used as negative samples.
@@ -468,17 +498,10 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Modu
                 features2_sim = features2_sim - logits_max2.detach()
                 logits2 = torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)) /  torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
 
-                del features2_prev_task
+                #del features2_prev_task
 
             loss_distill = (-logits2 * torch.log(logits1)).sum(1).mean()
-            print("IRD loss : ", loss_distill)
-            """
-            Current features : max = 0.26064956188201904    min = -0.2949966788291931       shape = torch.Size([1024, 128])
-            MLP output : max = 5.213999271392822    min = -5.823997497558594        shape = torch.Size([1024, 128])
-            similarities : max = 3409.20703125      min = -304.48486328125  shape = torch.Size([1024, 1024])
-            logits1 for IRD loss : max = 1.0        min = 0.0       shape = torch.Size([1024, 1023])
-            IRD loss :  tensor(nan, device='cuda:0', grad_fn=<MeanBackward0>)
-            """
+            #print("IRD loss : ", loss_distill) 
             loss += opt.distill_power * loss_distill
             distill.update(loss_distill.item(), bsz)
 
@@ -578,15 +601,6 @@ def main():
             #adding an MLP to learn features too specific for this task, then discard it when learning a new task
             mlp = create_mlp(opt)
             mlp_optimizer = set_optimizer(opt, mlp)
-            """task_model = nn.Sequential(
-                model,
-                mlp #not sure which optimizer this will use
-            )"""
-            """task_optimizer = torch.optim.SGD(
-                task_model.parameters(),
-                lr=opt.learning_rate,
-                momentum=opt.momentum,
-                weight_decay=opt.weight_decay)"""
         else :
             #task_model = None
             mlp = None
