@@ -14,6 +14,7 @@ import time
 import math
 import random
 import numpy as np
+import torchvision
 
 import tensorboard_logger as tb_logger
 import torch
@@ -22,6 +23,7 @@ import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 from torchvision import transforms, datasets
 from torch.utils.data import Subset, Dataset
+from torch.utils.tensorboard import SummaryWriter
 
 from datasets import TinyImagenet
 from util import TwoCropTransform, AverageMeter
@@ -406,6 +408,11 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
         data_time.update(time.time() - end)
 
         images = torch.cat([images[0], images[1]], dim=0)
+        # create grid of images
+        img_grid = torchvision.utils.make_grid(images)
+        # write to tensorboard
+        #tensorboard_writer.add_image('some_images', img_grid) #works fine        
+
         if torch.cuda.is_available():
             images = images.cuda(non_blocking=True)
             labels = labels.cuda(non_blocking=True)
@@ -443,9 +450,19 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
         # Asym SupCon
         f1, f2 = torch.split(features, [bsz, bsz], dim=0)
         features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
-        loss, loss_values = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
+        loss, loss_values, mask = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
         #print("loss : ", loss)
-        print("loss_values : ", loss_values)
+        #print("loss_values : ", loss_values)
+        """
+        loss_values :  tensor([[-6.2279, -6.2281, -6.2302,  ..., -6.2522, -6.2280, -6.2287],
+        [-6.2263, -6.2261, -6.2299,  ..., -6.2546, -6.2261, -6.2279],
+        [-6.2339, -6.2354, -6.2316,  ..., -6.2433, -6.2348, -6.2320],
+        ...,
+        [-6.2474, -6.2517, -6.2349,  ..., -6.2232, -6.2503, -6.2395],
+        [-6.2268, -6.2268, -6.2300,  ..., -6.2538, -6.2267, -6.2282],
+        [-6.2314, -6.2324, -6.2310,  ..., -6.2470, -6.2320, -6.2306]],
+       device='cuda:0', grad_fn=<SubBackward0>)
+        """
 
         # update buffer using Asym SupCon loss
         if epoch > 1:
@@ -454,21 +471,14 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
             # add data to buffer
             buffer.add_data(examples=images,
                                 labels=labels,
-                                task_labels=task, # TODO : find correct task labels
+                                task_labels=mask*images, # TODO : find correct task labels
                                 logits=features,
                                 loss_values=loss_values)
-        """Traceback (most recent call last):
-        File "/users/alicmabi11/Documents/Co2L/main_loss_buffer.py", line 599, in <module>
-            main()
-        File "/users/alicmabi11/Documents/Co2L/main_loss_buffer.py", line 580, in main
-            loss, model2 = train(train_loader, model, model2, criterion, optimizer, epoch, opt, buffer)
-                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/users/alicmabi11/Documents/Co2L/main_loss_buffer.py", line 455, in train
-            buffer.add_data(examples=images,
-        File "/users/alicmabi11/Documents/Co2L/buffer_lws.py", line 143, in add_data
-            self.labels[index] = labels[i].to(self.device)
-                                ~~~~~~^^^
-        IndexError: index 270 is out of bounds for dimension 0 with size 256"""
+        """
+        task_labels=mask*images,
+                    ~~~~^~~~~~~
+        RuntimeError: The size of tensor a (512) must match the size of tensor b (32) at non-singleton dimension 3
+        """
 
 
         # IRD (past)
@@ -544,8 +554,11 @@ def main():
             ).tolist()
         print(len(replay_indices))"""
 
-    # tensorboard
+    ########################## TENSORBOARD #############################
     logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
+    #global tensorboard_writer
+    tensorboard_writer = SummaryWriter('{}/summary'.format(opt.tb_folder))
+    ####################################################################
 
     original_epochs = opt.epochs
 
@@ -571,6 +584,7 @@ def main():
         # build data loader (dynamic: 0109)
         train_loader, subset_indices = set_loader(opt)
 
+
         np.save(
           os.path.join(opt.log_folder, 'subset_indices_{policy}_{target_task}.npy'.format(policy=opt.replay_policy ,target_task=target_task)),
           np.array(subset_indices))
@@ -584,7 +598,6 @@ def main():
             opt.epochs = original_epochs
 
         for epoch in range(1, opt.epochs + 1):
-
             adjust_learning_rate(opt, optimizer, epoch)
 
             # train for one epoch
@@ -598,6 +611,11 @@ def main():
             logger.log_value('loss_{target_task}'.format(target_task=target_task), loss, epoch)
             logger.log_value('learning_rate_{target_task}'.format(target_task=target_task), optimizer.param_groups[0]['lr'], epoch)
 
+        example_images = train_loader[0][0]
+        example_images = torch.cat([example_images[0], example_images[1]], dim=0)
+        tensorboard_writer.add_graph(model, example_images)
+
+
         ####### END OF TASK ##########
         # save the last model
         save_file = os.path.join(
@@ -606,6 +624,7 @@ def main():
 
         #reset buffer bins
         buffer.reset_bins()
+    tensorboard_writer.close()
 
 
 if __name__ == '__main__':

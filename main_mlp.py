@@ -22,6 +22,7 @@ import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 from torchvision import transforms, datasets
 from torch.utils.data import Subset, Dataset
+from torch.utils.tensorboard import SummaryWriter
 
 from datasets import TinyImagenet
 from util import TwoCropTransform, AverageMeter
@@ -478,15 +479,20 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Modu
             logits_max1, _ = torch.max(features1_sim * logits_mask, dim=1, keepdim=True)
             features1_sim = features1_sim - logits_max1.detach() #why substract max similarity ?
             row_size = features1_sim.size(0)
+<<<<<<< Updated upstream
             logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True) + 1e-20 #adding a really small value to ensure it's not 0 because log(0) = NaN
             #del features1_prev_task
             #print("logits1 for IRD loss : max = {}\tmin = {}\tshape = {}".format(torch.max(logits1), torch.min(logits1), logits1.size()))
+=======
+            logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
+            print("logits1 for IRD loss : max = {}\tmin = {}\tshape = {}".format(torch.max(logits1), torch.min(logits1), logits1.size()))
+>>>>>>> Stashed changes
             
 
         # Asym SupCon. asymmetrically modified version of the SupCon objective. We only use current task samples as anchors; past task samples from the memory buffer will only be used as negative samples.
         f1, f2 = torch.split(features, [bsz, bsz], dim=0)
         features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
-        loss = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
+        loss, logprob, mask = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
 
         # IRD (past)
         if opt.target_task > 0:
@@ -498,10 +504,15 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Modu
                 features2_sim = features2_sim - logits_max2.detach()
                 logits2 = torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)) /  torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
 
+<<<<<<< Updated upstream
                 #del features2_prev_task
 
             loss_distill = (-logits2 * torch.log(logits1)).sum(1).mean()
             #print("IRD loss : ", loss_distill) 
+=======
+            loss_distill = (-logits2 * torch.log(logits1)).sum(1).mean()
+            print("IRD loss : ", loss_distill)
+>>>>>>> Stashed changes
             loss += opt.distill_power * loss_distill
             distill.update(loss_distill.item(), bsz)
 
@@ -532,7 +543,7 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Modu
                    data_time=data_time, loss=losses, distill=distill))
             sys.stdout.flush()
 
-    return losses.avg, model2
+    return losses.avg, model2, images
 
 
 def main():
@@ -564,6 +575,7 @@ def main():
 
     # tensorboard
     logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
+    tensorboard_writer = SummaryWriter('{}/summary'.format(opt.tb_folder))
 
     original_epochs = opt.epochs
 
@@ -620,16 +632,23 @@ def main():
 
             # train for one epoch
             time1 = time.time()
-            loss, model2 = train(train_loader, model, mlp, model2, criterion, optimizer, mlp_optimizer, epoch, opt) #model2 is in eval mode so not modified here.
+            loss, model2, example_images = train(train_loader, model, mlp, model2, criterion, optimizer, mlp_optimizer, epoch, opt) #model2 is in eval mode so not modified here.
             time2 = time.time()
             print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
             # tensorboard logger
             logger.log_value('loss_{target_task}'.format(target_task=target_task), loss, epoch)
             logger.log_value('learning_rate_{target_task}'.format(target_task=target_task), optimizer.param_groups[0]['lr'], epoch)
+        
+        features = model(example_images)
+        tensorboard_writer.add_graph(mlp, features)
+
+
 
         #KEEP MODEL AND DISCARD MLP
         if opt.target_task > 0:
+            tensorboard_writer.add_graph(mlp, features)
+
             #Taking out the trash : discarding mlp
             del mlp
             #del task_model
@@ -640,6 +659,10 @@ def main():
         save_file = os.path.join(
             opt.save_folder, 'last_{policy}_{target_task}.pth'.format(policy=opt.replay_policy ,target_task=target_task))
         save_model(model, optimizer, opt, opt.epochs, save_file)
+    
+    #tensorboard_writer.add_graph(model, example_images)
+    tensorboard_writer.close()
+    
 
 if __name__ == '__main__':
     main()

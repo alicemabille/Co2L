@@ -130,7 +130,7 @@ class Buffer(Dataset):
             self.init_tensors(examples, labels, logits, task_labels, clusters_labels=clusters_labels, clusters_logits=clusters_logits, loss_values=loss_values)
         rix = []
         for i in range(examples.shape[0]):
-            index = self.reservoir_bin_loss(loss_values[i])
+            index = self.reservoir_bin_loss(loss_values[i]) #choosing which samples to store
             self.num_seen_examples += 1
             if index >= 0:
                 self.num_examples += 1

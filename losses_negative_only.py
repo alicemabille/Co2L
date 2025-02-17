@@ -57,7 +57,7 @@ class SupConLoss(nn.Module):
         # compute logits
         anchor_dot_contrast = torch.div(
             torch.matmul(anchor_feature, contrast_feature.T),
-            self.temperature)
+            self.temperature) # exp(zi · zj/τ )
         # for numerical stability
         logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
         logits = anchor_dot_contrast - logits_max.detach()
@@ -74,11 +74,14 @@ class SupConLoss(nn.Module):
         mask = mask * logits_mask
 
         # compute log_prob
-        exp_logits = torch.exp(logits) * logits_mask
-        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
+        exp_logits = torch.exp(logits) * logits_mask # exp(zi · zj/τ ) where j!=i and yj = yi
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True)) 
+        # log ( exp(zi · zj/τ ) / ∑ k6=i exp(zi · zk/τ ) ) = log(exp(zi · zj/τ )) - log(∑ k6=i exp(zi · zk/τ ))
+        # = (zi · zj/τ ) - log(∑ k6=i exp(zi · zk/τ ))
 
         # compute mean of log-likelihood over positive
         mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1)
+        # mask.sum(1) = number of positive sample for current sample xi
 
         # loss
         loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
@@ -97,5 +100,5 @@ class SupConLoss(nn.Module):
             raise ValueError('loss reduction not supported: {}'.
                              format(reduction))
 
-        return loss, mean_log_prob_pos #TODO : choose what loss values to return for buffer management
+        return loss, log_prob, mask #TODO : choose what loss values to return for buffer management
     #TODO : find what samples correspond to mean_log_prob_pos
