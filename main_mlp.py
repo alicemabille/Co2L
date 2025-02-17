@@ -408,13 +408,12 @@ def create_mlp(opt:argparse.Namespace) -> nn.Module:
         nn.ReLU(),                         # tester autre fct activation
         nn.Linear(opt.mlp_hidden_dim, 128)  # Layer 2: Linear (hidden_dim -> output_dim)
     )
-    criterion = torch.nn.CrossEntropyLoss()
 
     if torch.cuda.is_available():
         model = model.cuda()
         cudnn.benchmark = True
 
-    return model, criterion
+    return model
 
 
 def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Module, model2:nn.Module, criterion:SupConLoss, optimizer:torch.optim.SGD, mlp_optimizer:torch.optim.Optimizer, epoch:int, opt:argparse.Namespace):
@@ -479,14 +478,9 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Modu
             logits_max1, _ = torch.max(features1_sim * logits_mask, dim=1, keepdim=True)
             features1_sim = features1_sim - logits_max1.detach() #why substract max similarity ?
             row_size = features1_sim.size(0)
-<<<<<<< Updated upstream
             logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True) + 1e-20 #adding a really small value to ensure it's not 0 because log(0) = NaN
             #del features1_prev_task
             #print("logits1 for IRD loss : max = {}\tmin = {}\tshape = {}".format(torch.max(logits1), torch.min(logits1), logits1.size()))
-=======
-            logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
-            print("logits1 for IRD loss : max = {}\tmin = {}\tshape = {}".format(torch.max(logits1), torch.min(logits1), logits1.size()))
->>>>>>> Stashed changes
             
 
         # Asym SupCon. asymmetrically modified version of the SupCon objective. We only use current task samples as anchors; past task samples from the memory buffer will only be used as negative samples.
@@ -504,15 +498,10 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Modu
                 features2_sim = features2_sim - logits_max2.detach()
                 logits2 = torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)) /  torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
 
-<<<<<<< Updated upstream
                 #del features2_prev_task
 
             loss_distill = (-logits2 * torch.log(logits1)).sum(1).mean()
             #print("IRD loss : ", loss_distill) 
-=======
-            loss_distill = (-logits2 * torch.log(logits1)).sum(1).mean()
-            print("IRD loss : ", loss_distill)
->>>>>>> Stashed changes
             loss += opt.distill_power * loss_distill
             distill.update(loss_distill.item(), bsz)
 
@@ -641,8 +630,6 @@ def main():
             logger.log_value('learning_rate_{target_task}'.format(target_task=target_task), optimizer.param_groups[0]['lr'], epoch)
         
         features = model(example_images)
-        tensorboard_writer.add_graph(mlp, features)
-
 
 
         #KEEP MODEL AND DISCARD MLP
@@ -653,6 +640,11 @@ def main():
             del mlp
             #del task_model
             torch.cuda.empty_cache()  # Free up GPU memory
+
+        """
+        C:\Python311\Lib\site-packages\torch\jit\_trace.py:166: UserWarning: The .grad attribute of a Tensor that is not a leaf Tensor is being accessed. Its .grad attribute won't be populated during autograd.backward(). If you indeed want the .grad field to be populated for a non-leaf Tensor, use .retain_grad() on the non-leaf Tensor. If you access the non-leaf Tensor by mistake, make sure you access the leaf Tensor instead. See github.com/pytorch/pytorch/pull/30531 for more informations. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\builder\windows\pytorch\build\aten\src\ATen/core/TensorBody.h:494.)
+        if a.grad is not None:
+        """
 
 
         # save the last model
