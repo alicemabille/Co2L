@@ -189,10 +189,9 @@ def parse_option():
 
 def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=None):
 
-    is_training = model.training # ?
+    is_training = model.training
     model.eval() #set the model to evaluation mode
 
-    # ?
     class IdxDataset(Dataset):
         def __init__(self, dataset, indices):
             self.dataset = dataset
@@ -207,8 +206,6 @@ def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=N
         transforms.ToTensor(),
     ])
 
-    ####################### DATASETS ###########################
-    # fetch dataset
     if opt.dataset == 'cifar10':
         subset_indices = []
         val_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
@@ -225,31 +222,19 @@ def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=N
 
     else:
         raise ValueError('dataset not supported: {}'.format(opt.dataset))
-    ##############################################################
 
-
-    # select previous samples and add to buffer
     if prev_indices is None:
         prev_indices = []
         observed_classes = list(range(0, opt.target_task*opt.cls_per_task))
     else:
-        # compute amount of buffer memory we can currently modify, as all previous tasks have evenly distributed samples in the buffer
         shrink_size = ((opt.target_task - 1) * opt.mem_size / opt.target_task)
-
         if len(prev_indices) > 0:
-            # find unique target classes of all buffered samples
             unique_cls = np.unique(val_targets[prev_indices])
-            # store previous indices
             _prev_indices = prev_indices
-
-            # reset prev_indices array and add selected samples
             prev_indices = []
-            for c in unique_cls:
-                # mask for choosing past samples that belong to current class c
-                # only has 0s and 1s : mask.sum() will give the number of past samples that belong to class c
-                mask = val_targets[_prev_indices] == c
 
-                # compute amount of buffer memory for each class
+            for c in unique_cls:
+                mask = val_targets[_prev_indices] == c
                 size_for_c = shrink_size / len(unique_cls)
                 p = size_for_c - (shrink_size // len(unique_cls))
                 if random.random() < p:
@@ -257,13 +242,11 @@ def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=N
                 else:
                     size_for_c = math.floor(size_for_c)
 
-                # euh TODO commenter ça
                 prev_indices += torch.tensor(_prev_indices)[mask][torch.randperm(mask.sum())[:size_for_c]].tolist()
 
             print(np.unique(val_targets[prev_indices], return_counts=True))
         observed_classes = list(range(max(opt.target_task-1, 0)*opt.cls_per_task, (opt.target_task)*opt.cls_per_task))
 
-    # i don't even know how this could happen
     if len(observed_classes) == 0:
         return prev_indices
 
@@ -295,10 +278,7 @@ def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=N
 
 
 def set_loader(opt:argparse.Namespace, replay_indices) :
-    """
-    construct data loader
-
-    """
+    # construct data loader
     if opt.dataset == 'cifar10':
         mean = (0.4914, 0.4822, 0.4465)
         std = (0.2023, 0.1994, 0.2010)
@@ -311,7 +291,7 @@ def set_loader(opt:argparse.Namespace, replay_indices) :
     else:
         raise ValueError('dataset not supported: {}'.format(opt.dataset))
 
-    ######################## DATA AUGMENTATION #################################
+
     normalize = transforms.Normalize(mean=mean, std=std)
     train_transform = transforms.Compose([
         transforms.Resize(size=(opt.size, opt.size)),
@@ -325,13 +305,11 @@ def set_loader(opt:argparse.Namespace, replay_indices) :
         transforms.ToTensor(),
         normalize,
     ])
-    ###########################################################################
+
 
     target_classes = list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task))
     print(target_classes)
 
-    ##################### CONTINUAL LEARNING DATASETS ######################################
-    # divide dataset into different tasks for continual learning
     if opt.dataset == 'cifar10':
         subset_indices = []
         _train_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
@@ -369,8 +347,6 @@ def set_loader(opt:argparse.Namespace, replay_indices) :
                                             transform=TwoCropTransform(train_transform))
     else:
         raise ValueError(opt.dataset)
-    ###################################################################################################
-
 
     train_sampler = None
     train_loader = torch.utils.data.DataLoader(
@@ -382,10 +358,6 @@ def set_loader(opt:argparse.Namespace, replay_indices) :
 
 
 def set_model(opt:argparse.Namespace) -> tuple[SupConResNet, SupConLoss]:
-    """
-    Sets continual learning SupConResNet model that uses SupCon loss.
-    Uses DataParallel for the encoder : be careful about loading model when DataParallel is not available (should remove ".module" in state_dict)
-    """
     model = SupConResNet(name=opt.model)
     criterion = SupConLoss(temperature=opt.temp)
 
@@ -400,9 +372,6 @@ def set_model(opt:argparse.Namespace) -> tuple[SupConResNet, SupConLoss]:
 
 
 def create_mlp(opt:argparse.Namespace) -> nn.Module:
-    """
-    Creates a simple Multi Layer Perceptron to 
-    """
     model = nn.Sequential(
         nn.Linear(128, opt.mlp_hidden_dim),  # Layer 1: Linear (input_dim -> hidden_dim)
         nn.ReLU(),                         # tester autre fct activation
@@ -415,8 +384,43 @@ def create_mlp(opt:argparse.Namespace) -> nn.Module:
 
     return model
 
+def gradients(model) :
+    grads = []
+    for param in model.parameters():
+        grads.append(param.grad.view(-1))
+    grads = torch.cat(grads)
+    return grads
 
-def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Module, model2:nn.Module, criterion:SupConLoss, optimizer:torch.optim.SGD, mlp_optimizer:torch.optim.Optimizer, epoch:int, opt:argparse.Namespace):
+
+    """def get_base_layers(module):
+    base_layers = []
+    
+    def iterate_layers(module):
+        for m in module.modules():
+            if not list(m.children()):  # Check if it's a base layer (no children)
+                base_layers.append(list(m.parameters()))
+            else:
+                iterate_layers(m)  # Recursively iterate over nested layers
+    
+    iterate_layers(module)
+    return base_layers"""
+
+
+    """def rec_layers(module:nn.Module, layers:list[torch.Tensor]) -> list[torch.Tensor]:
+    """
+    #recursively iterate over all layers of given model and return all flattened layers
+    """
+    for name, layer in module.named_children():
+        #print(f"Layer Name: {name}, Layer Type: {type(layer)}")
+        child_layers = rec_layers(layer, layers)  # Recursively iterate over nested layers
+        print(f'layers : {layers}')
+        for child_layer in child_layers :
+            if child_layer.__class__ == torch.Tensor :
+                layers.append(layer)
+    return layers"""
+
+
+def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, mlp:nn.Module, model2:SupConResNet, criterion:SupConLoss, optimizer:torch.optim.SGD, mlp_optimizer:torch.optim.Optimizer, epoch:int, opt:argparse.Namespace):
     """
     one epoch training
 
@@ -478,8 +482,7 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Modu
             logits_max1, _ = torch.max(features1_sim * logits_mask, dim=1, keepdim=True)
             features1_sim = features1_sim - logits_max1.detach() #why substract max similarity ?
             row_size = features1_sim.size(0)
-            logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True) + 1e-20 #adding a really small value to ensure it's not 0 because log(0) = NaN
-            #del features1_prev_task
+            logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
             #print("logits1 for IRD loss : max = {}\tmin = {}\tshape = {}".format(torch.max(logits1), torch.min(logits1), logits1.size()))
             
 
@@ -498,10 +501,8 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Modu
                 features2_sim = features2_sim - logits_max2.detach()
                 logits2 = torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)) /  torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
 
-                #del features2_prev_task
-
             loss_distill = (-logits2 * torch.log(logits1)).sum(1).mean()
-            #print("IRD loss : ", loss_distill) 
+            print("IRD loss : ", loss_distill)
             loss += opt.distill_power * loss_distill
             distill.update(loss_distill.item(), bsz)
 
@@ -512,15 +513,38 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, mlp:nn.Modu
         optimizer.zero_grad()
         if opt.target_task > 0:
             mlp_optimizer.zero_grad()
-        loss.backward()
+
+        #model_tensors = [m for m in model.encoder.modules()] + [m for m in model.head.modules()]
+        #model_tensors = rec_layers(model, [])
+        #model_tensors = get_base_layers(model)
+        model_tensors = [t for t in model.parameters()]
+        print(f'model_tensors : {model_tensors}')
+        loss.backward(inputs = model_tensors) #retain_graph = True will get cuda out of memory error
+        grads = gradients(model)
+        tensorboard_writer.add_histogram("SupConResNet gradient parameters", grads, epoch)
         optimizer.step()
+
         if opt.target_task > 0:
+            loss_distill.backward(inputs = [m.parameters() for m in mlp.modules()]) 
+            """
+            inputs : sequence of Tensor, optional
+            Inputs w.r.t. which the gradient will be accumulated into .grad. All other tensors will be ignored. 
+            If not provided, the gradient is accumulated into all the leaf Tensors that were used to compute the tensors.
+            """
+            grads_mlp = gradients(mlp)
+            """
+            RuntimeError: Trying to backward through the graph a second time (or directly access saved tensors after they have already been freed). 
+            Saved intermediate values of the graph are freed when you call .backward() or autograd.grad(). 
+            Specify retain_graph=True if you need to backward through the graph a second time or if you need to access saved tensors after calling backward.
+            """
+            tensorboard_writer.add_histogram("MLP gradient parameters", grads_mlp, epoch)
             mlp_optimizer.step()
 
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
+            
 
         # print info
         if (idx + 1) % opt.print_freq == 0 or idx+1 == len(train_loader):
@@ -564,6 +588,7 @@ def main():
 
     # tensorboard
     logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
+    global tensorboard_writer 
     tensorboard_writer = SummaryWriter('{}/summary'.format(opt.tb_folder))
 
     original_epochs = opt.epochs
@@ -625,12 +650,11 @@ def main():
             time2 = time.time()
             print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
-            # tensorboard logger
+            # tensorboard logger and writer
             logger.log_value('loss_{target_task}'.format(target_task=target_task), loss, epoch)
             logger.log_value('learning_rate_{target_task}'.format(target_task=target_task), optimizer.param_groups[0]['lr'], epoch)
         
         features = model(example_images)
-
 
         #KEEP MODEL AND DISCARD MLP
         if opt.target_task > 0:
@@ -640,11 +664,6 @@ def main():
             del mlp
             #del task_model
             torch.cuda.empty_cache()  # Free up GPU memory
-
-        """
-        C:\Python311\Lib\site-packages\torch\jit\_trace.py:166: UserWarning: The .grad attribute of a Tensor that is not a leaf Tensor is being accessed. Its .grad attribute won't be populated during autograd.backward(). If you indeed want the .grad field to be populated for a non-leaf Tensor, use .retain_grad() on the non-leaf Tensor. If you access the non-leaf Tensor by mistake, make sure you access the leaf Tensor instead. See github.com/pytorch/pytorch/pull/30531 for more informations. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\builder\windows\pytorch\build\aten\src\ATen/core/TensorBody.h:494.)
-        if a.grad is not None:
-        """
 
 
         # save the last model

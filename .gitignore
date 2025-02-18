@@ -5,3 +5,4 @@
 /~/data
 *.fr
 *.0
+events.out.tfevents.*
