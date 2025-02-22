@@ -22,14 +22,20 @@ import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 from torchvision import transforms, datasets
 from torch.utils.data import Subset, Dataset
-from torch.utils.tensorboard import SummaryWriter
 
 from datasets import TinyImagenet
 from util import TwoCropTransform, AverageMeter
 from util import adjust_learning_rate, warmup_learning_rate
 from util import set_optimizer, save_model, load_model
-from networks.resnet_big import SupConResNet
+from networks.resnet_extended import SupConResNet
 from losses_negative_only import SupConLoss
+
+
+'''try:
+    import apex
+    from apex import amp, optimizers
+except ImportError:
+    pass'''
 
 
 def parse_option():
@@ -132,13 +138,10 @@ def parse_option():
     # set the path according to the environment
     if opt.data_folder is None:
         opt.data_folder = '~/data/'
-    
-    #opt.model_path = './save_extendedIRD_{}_{}/{}_models'.format(opt.replay_policy, opt.mem_size, opt.dataset)
-    #opt.tb_path = './save_extendedIRD_{}_{}/{}_tensorboard'.format(opt.replay_policy, opt.mem_size, opt.dataset)
-    #opt.log_path = './save_extendedIRD_{}_{}/logs'.format(opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.model_path = '{}/save_extendedIRD_{}_{}/{}_models'.format(opt.data_folder , opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.tb_path = '{}/save_extendedIRD_{}_{}/{}_tensorboard'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.log_path = '{}/save_extendedIRD_{}_{}/logs'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
+
+    opt.model_path = '{}/save_{}_{}/{}_models'.format(opt.data_folder , opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.tb_path = '{}/save_{}_{}/{}_tensorboard'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.log_path = '{}/save_{}_{}/logs'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
 
     iterations = opt.lr_decay_epochs.split(',')
     opt.lr_decay_epochs = list([])
@@ -187,10 +190,10 @@ def parse_option():
     return opt
 
 
-def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=None):
+def set_replay_samples(opt, model, prev_indices=None):
 
     is_training = model.training
-    model.eval() #set the model to evaluation mode
+    model.eval()
 
     class IdxDataset(Dataset):
         def __init__(self, dataset, indices):
@@ -277,7 +280,7 @@ def set_replay_samples(opt: argparse.Namespace, model: nn.Module, prev_indices=N
     return prev_indices + selected_observed_indices
 
 
-def set_loader(opt:argparse.Namespace, replay_indices) :
+def set_loader(opt, replay_indices):
     # construct data loader
     if opt.dataset == 'cifar10':
         mean = (0.4914, 0.4822, 0.4465)
@@ -313,7 +316,7 @@ def set_loader(opt:argparse.Namespace, replay_indices) :
     if opt.dataset == 'cifar10':
         subset_indices = []
         _train_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
-                                         transform=TwoCropTransform(train_transform), #To enjoy the benefits of contrastive representation learning, each sample is augmented into two views.
+                                         transform=TwoCropTransform(train_transform),
                                          download=True)
         for tc in target_classes:
             target_class_indices = np.where(np.array(_train_dataset.targets) == tc)[0]
@@ -357,7 +360,8 @@ def set_loader(opt:argparse.Namespace, replay_indices) :
 
 
 
-def set_model(opt:argparse.Namespace) -> tuple[SupConResNet, SupConLoss]:
+
+def set_model(opt):
     model = SupConResNet(name=opt.model)
     criterion = SupConLoss(temperature=opt.temp)
 
@@ -371,67 +375,20 @@ def set_model(opt:argparse.Namespace) -> tuple[SupConResNet, SupConLoss]:
     return model, criterion
 
 
-def create_mlp(opt:argparse.Namespace) -> nn.Module:
-    model = nn.Sequential(
-        nn.Linear(128, opt.mlp_hidden_dim),  # Layer 1: Linear (input_dim -> hidden_dim)
-        nn.ReLU(),                         # tester autre fct activation
-        nn.Linear(opt.mlp_hidden_dim, 128)  # Layer 2: Linear (hidden_dim -> output_dim)
-    )
 
-    if torch.cuda.is_available():
-        model = model.cuda()
-        cudnn.benchmark = True
-
-    return model
-
-def gradients(model) :
-    grads = []
-    for param in model.parameters():
-        grads.append(param.grad.view(-1))
-    grads = torch.cat(grads)
-    return grads
-
-
-    """def get_base_layers(module):
-    base_layers = []
-    
-    def iterate_layers(module):
-        for m in module.modules():
-            if not list(m.children()):  # Check if it's a base layer (no children)
-                base_layers.append(list(m.parameters()))
-            else:
-                iterate_layers(m)  # Recursively iterate over nested layers
-    
-    iterate_layers(module)
-    return base_layers"""
-
-
-    """def rec_layers(module:nn.Module, layers:list[torch.Tensor]) -> list[torch.Tensor]:
-    """
-    #recursively iterate over all layers of given model and return all flattened layers
-    """
-    for name, layer in module.named_children():
-        #print(f"Layer Name: {name}, Layer Type: {type(layer)}")
-        child_layers = rec_layers(layer, layers)  # Recursively iterate over nested layers
-        print(f'layers : {layers}')
-        for child_layer in child_layers :
-            if child_layer.__class__ == torch.Tensor :
-                layers.append(layer)
-    return layers"""
-
-
-def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, mlp:nn.Module, model2:SupConResNet, criterion:SupConLoss, optimizer:torch.optim.SGD, mlp_optimizer:torch.optim.Optimizer, epoch:int, opt:argparse.Namespace):
+def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
     """
     one epoch training
 
     train_loader : union of current task samples and buffered samples, without any oversampling.
     model : the new model to train (this function calls .train() on it)
-    mlp : extension of current model to only use in computing IRD, and to discard at the end of learning current task.
     model2 : frozen previous model, in test mode (previously called .eval() on it)
     criterion : 
     optimizer : stochastic gradient descent for the model's parameters, with specified learning rate, momentum and weight decay
     epoch : specifies which epoch this is, to calculate a warm-up learning rate if the epoch is in warm-up phase
     """
+    global features
+
     model.train()
 
     batch_time = AverageMeter()
@@ -440,8 +397,6 @@ def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, mlp:nn.M
     distill = AverageMeter()
 
     end = time.time()
-
-    #The mini-batch is drawn from this dataset, where each sample is independently drawn with equal probability.
     for idx, (images, labels) in enumerate(train_loader):
         data_time.update(time.time() - end)
 
@@ -459,20 +414,14 @@ def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, mlp:nn.M
         # warm-up learning rate
         warmup_learning_rate(opt, epoch, idx, len(train_loader), optimizer)
 
-        # compute loss (forward pass)
-        features, encoded = model(images, return_feat=True)
+        # compute loss
+        predictions, features = model(images, return_feat=True)
 
         # IRD (current)
         if opt.target_task > 0:
-            features1 = features
-            #print("Current features : max = {}\tmin = {}\tshape = {}".format(torch.max(features1), torch.min(features1), features1.size()))
-
-            #using task_model only to compute current IRD loss
-            features1_prev_task = mlp(features1)
-            #print("MLP output : max = {}\tmin = {}\tshape = {}".format(torch.max(features1_prev_task), torch.min(features1_prev_task), features1_prev_task.size()))
+            features1_prev_task = predictions
 
             features1_sim = torch.div(torch.matmul(features1_prev_task, features1_prev_task.T), opt.current_temp)
-            #print("similarities : max = {}\tmin = {}\tshape = {}".format(torch.max(features1_sim), torch.min(features1_sim), features1_sim.size()))
             logits_mask = torch.scatter(
                 torch.ones_like(features1_sim),
                 1,
@@ -480,20 +429,20 @@ def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, mlp:nn.M
                 0
             )
             logits_max1, _ = torch.max(features1_sim * logits_mask, dim=1, keepdim=True)
-            features1_sim = features1_sim - logits_max1.detach() #why substract max similarity ?
+            features1_sim = features1_sim - logits_max1.detach()
             row_size = features1_sim.size(0)
             logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
-            #print("logits1 for IRD loss : max = {}\tmin = {}\tshape = {}".format(torch.max(logits1), torch.min(logits1), logits1.size()))
-            
 
-        # Asym SupCon. asymmetrically modified version of the SupCon objective. We only use current task samples as anchors; past task samples from the memory buffer will only be used as negative samples.
+        # Asym SupCon, not using the MLP extension
+        #print("SupConResNet head output features : ", features)
         f1, f2 = torch.split(features, [bsz, bsz], dim=0)
         features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
         loss, logprob, mask = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
+        loss += 0.0001 #to avoid vanishing gradient, nan loss anyway
 
         # IRD (past)
         if opt.target_task > 0:
-            with torch.no_grad(): #disables gradient calculation for model2 : frozen previous model, in eval mode
+            with torch.no_grad():
                 features2_prev_task = model2(images)
 
                 features2_sim = torch.div(torch.matmul(features2_prev_task, features2_prev_task.T), opt.past_temp)
@@ -501,8 +450,8 @@ def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, mlp:nn.M
                 features2_sim = features2_sim - logits_max2.detach()
                 logits2 = torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)) /  torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
 
+
             loss_distill = (-logits2 * torch.log(logits1)).sum(1).mean()
-            print("IRD loss : ", loss_distill)
             loss += opt.distill_power * loss_distill
             distill.update(loss_distill.item(), bsz)
 
@@ -511,40 +460,13 @@ def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, mlp:nn.M
 
         # SGD
         optimizer.zero_grad()
-        if opt.target_task > 0:
-            mlp_optimizer.zero_grad()
-
-        #model_tensors = [m for m in model.encoder.modules()] + [m for m in model.head.modules()]
-        #model_tensors = rec_layers(model, [])
-        #model_tensors = get_base_layers(model)
-        model_tensors = [t for t in model.parameters()]
-        print(f'model_tensors : {model_tensors}')
-        loss.backward(inputs = model_tensors) #retain_graph = True will get cuda out of memory error
-        grads = gradients(model)
-        tensorboard_writer.add_histogram("SupConResNet gradient parameters", grads, epoch)
+        loss.backward()
         optimizer.step()
-
-        if opt.target_task > 0:
-            loss_distill.backward(inputs = [m.parameters() for m in mlp.modules()]) 
-            """
-            inputs : sequence of Tensor, optional
-            Inputs w.r.t. which the gradient will be accumulated into .grad. All other tensors will be ignored. 
-            If not provided, the gradient is accumulated into all the leaf Tensors that were used to compute the tensors.
-            """
-            grads_mlp = gradients(mlp)
-            """
-            RuntimeError: Trying to backward through the graph a second time (or directly access saved tensors after they have already been freed). 
-            Saved intermediate values of the graph are freed when you call .backward() or autograd.grad(). 
-            Specify retain_graph=True if you need to backward through the graph a second time or if you need to access saved tensors after calling backward.
-            """
-            tensorboard_writer.add_histogram("MLP gradient parameters", grads_mlp, epoch)
-            mlp_optimizer.step()
 
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
-            
 
         # print info
         if (idx + 1) % opt.print_freq == 0 or idx+1 == len(train_loader):
@@ -556,7 +478,7 @@ def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, mlp:nn.M
                    data_time=data_time, loss=losses, distill=distill))
             sys.stdout.flush()
 
-    return losses.avg, model2, images
+    return losses.avg, model2
 
 
 def main():
@@ -567,10 +489,9 @@ def main():
     # build model and criterion
     model, criterion = set_model(opt)
     model2, _ = set_model(opt)
-    model2.eval() #frozen old model
+    model2.eval()
 
     # build optimizer
-    #setting SGD for new model : creates an optim.SGD object with the model's parameters and learning rate, momentum and weight decay specified in args
     optimizer = set_optimizer(opt, model)
 
     replay_indices = None
@@ -588,12 +509,9 @@ def main():
 
     # tensorboard
     logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
-    global tensorboard_writer 
-    tensorboard_writer = SummaryWriter('{}/summary'.format(opt.tb_folder))
 
     original_epochs = opt.epochs
 
-    # setting task and epochs number
     if opt.end_task is not None:
         if opt.resume_target_task is not None:
             assert opt.end_task > opt.resume_target_task
@@ -601,11 +519,10 @@ def main():
     else:
         opt.end_task = opt.n_cls // opt.cls_per_task
 
-    #training for all indicated tasks
     for target_task in range(0 if opt.resume_target_task is None else opt.resume_target_task+1, opt.end_task):
 
         opt.target_task = target_task
-        model2 = copy.deepcopy(model) #frozen old model
+        model2 = copy.deepcopy(model)
 
         print('Start Training current task {}'.format(opt.target_task))
 
@@ -623,15 +540,7 @@ def main():
           os.path.join(opt.log_folder, 'subset_indices_{policy}_{target_task}.npy'.format(policy=opt.replay_policy ,target_task=target_task)),
           np.array(subset_indices))
 
-        if opt.target_task > 0:
-            #adding an MLP to learn features too specific for this task, then discard it when learning a new task
-            mlp = create_mlp(opt)
-            mlp_optimizer = set_optimizer(opt, mlp)
-        else :
-            #task_model = None
-            mlp = None
-            mlp_optimizer = None
-            
+
 
         # training routine
         if target_task == 0 and opt.start_epoch is not None:
@@ -639,41 +548,24 @@ def main():
         else:
             opt.epochs = original_epochs
 
-        #training for a given number of epochs
         for epoch in range(1, opt.epochs + 1):
 
             adjust_learning_rate(opt, optimizer, epoch)
 
             # train for one epoch
             time1 = time.time()
-            loss, model2, example_images = train(train_loader, model, mlp, model2, criterion, optimizer, mlp_optimizer, epoch, opt) #model2 is in eval mode so not modified here.
+            loss, model2 = train(train_loader, model, model2, criterion, optimizer, epoch, opt)
             time2 = time.time()
             print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
-            # tensorboard logger and writer
+            # tensorboard logger
             logger.log_value('loss_{target_task}'.format(target_task=target_task), loss, epoch)
             logger.log_value('learning_rate_{target_task}'.format(target_task=target_task), optimizer.param_groups[0]['lr'], epoch)
-        
-        features = model(example_images)
-
-        #KEEP MODEL AND DISCARD MLP
-        if opt.target_task > 0:
-            tensorboard_writer.add_graph(mlp, features)
-
-            #Taking out the trash : discarding mlp
-            del mlp
-            #del task_model
-            torch.cuda.empty_cache()  # Free up GPU memory
-
 
         # save the last model
         save_file = os.path.join(
             opt.save_folder, 'last_{policy}_{target_task}.pth'.format(policy=opt.replay_policy ,target_task=target_task))
         save_model(model, optimizer, opt, opt.epochs, save_file)
-    
-    #tensorboard_writer.add_graph(model, example_images)
-    tensorboard_writer.close()
-    
 
 if __name__ == '__main__':
     main()
