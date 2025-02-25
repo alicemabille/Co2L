@@ -72,6 +72,7 @@ def adjust_learning_rate(args, optimizer, epoch):
 
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+    print("learning rate : ", lr)
 
 
 def warmup_learning_rate(args, epoch, batch_id, total_batches, optimizer):
@@ -82,6 +83,8 @@ def warmup_learning_rate(args, epoch, batch_id, total_batches, optimizer):
 
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
+            
+        print("learning rate : ", lr)
 
 
 def set_optimizer(opt, model):

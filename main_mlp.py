@@ -6,6 +6,7 @@ https://github.com/HobbitLong/SupContrast/blob/master/main_supcon.py
 from __future__ import print_function
 
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 import copy
 import sys
 import argparse
@@ -29,6 +30,12 @@ from util import adjust_learning_rate, warmup_learning_rate
 from util import set_optimizer, save_model, load_model
 from networks.resnet_extended import SupConResNet
 from losses_negative_only import SupConLoss
+
+from pytorch_grad_cam import GradCAM
+from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+from pytorch_grad_cam.utils.image import show_cam_on_image
+from matplotlib import pyplot as plt
+from PIL import Image
 
 
 '''try:
@@ -142,6 +149,7 @@ def parse_option():
     opt.model_path = '{}/save_{}_{}/{}_models'.format(opt.data_folder , opt.replay_policy, opt.mem_size, opt.dataset)
     opt.tb_path = '{}/save_{}_{}/{}_tensorboard'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
     opt.log_path = '{}/save_{}_{}/logs'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.cam_path = '{}/save_{}_{}/{}_cam'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
 
     iterations = opt.lr_decay_epochs.split(',')
     opt.lr_decay_epochs = list([])
@@ -376,7 +384,7 @@ def set_model(opt):
 
 
 
-def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
+def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, model2:SupConResNet, criterion, optimizer, epoch:int, opt:argparse.Namespace):
     """
     one epoch training
 
@@ -391,21 +399,30 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
 
     model.train()
 
+    print("creating gradCAM...")
+    cam_layers = [model.head[-1]]
+    # Construct the CAM object once, and then re-use it on many images:
+    cam = GradCAM(model=model, target_layers=cam_layers)
+
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
     distill = AverageMeter()
 
     end = time.time()
+    print("entering batch loop...")
     for idx, (images, labels) in enumerate(train_loader):
         data_time.update(time.time() - end)
 
+        #concatenate images from both classes of the current task
         images = torch.cat([images[0], images[1]], dim=0)
         if torch.cuda.is_available():
-            images = images.cuda(non_blocking=True)
+            print("copying images and labels to CUDA memory...")
+            images_cuda = images.cuda(non_blocking=True)
             labels = labels.cuda(non_blocking=True)
-        bsz = labels.shape[0]
+        bsz = labels.shape[0] #batch size
 
+        print("creating previous task mask...")
         with torch.no_grad():
             prev_task_mask = labels < opt.target_task * opt.cls_per_task
             prev_task_mask = prev_task_mask.repeat(2)
@@ -414,8 +431,21 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
         # warm-up learning rate
         warmup_learning_rate(opt, epoch, idx, len(train_loader), optimizer)
 
-        # compute loss
-        predictions, features = model(images, return_feat=True)
+        #forward pass
+        print("forward pass to model...")
+        predictions, features = model(images_cuda, return_feat=True)
+        print("shape of images tensor : ", images.shape)
+        try :
+            #grad-CAM
+            grayscale_cam = cam(input_tensor=images_cuda)
+            # In this example grayscale_cam has only one image in the batch:
+            grayscale_cam = grayscale_cam[0, :]
+            visualization = show_cam_on_image(images.numpy(), grayscale_cam, use_rgb=True)
+            img = Image.fromarray(visualization, 'RGB')
+            img.save('{}/{}.png'.format(opt.cam_folder, idx))
+        except ValueError as e :
+            print(e)
+            pass
 
         # IRD (current)
         if opt.target_task > 0:
@@ -438,12 +468,12 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
         f1, f2 = torch.split(features, [bsz, bsz], dim=0)
         features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
         loss, logprob, mask = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
-        loss += 0.0001 #to avoid vanishing gradient, nan loss anyway
+        print("AsymSupCon loss : ",loss)
 
         # IRD (past)
         if opt.target_task > 0:
             with torch.no_grad():
-                features2_prev_task = model2(images)
+                features2_prev_task = model2(images_cuda)
 
                 features2_sim = torch.div(torch.matmul(features2_prev_task, features2_prev_task.T), opt.past_temp)
                 logits_max2, _ = torch.max(features2_sim*logits_mask, dim=1, keepdim=True)
@@ -478,6 +508,14 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
                    data_time=data_time, loss=losses, distill=distill))
             sys.stdout.flush()
 
+        #loss gets lower at the end of epoch : 
+        """
+        The last mini-batch that passes thru your model is probably very small 
+        (it is the remainder of the what is left after dividing the full dataset into batches of equal size), 
+        so it results in a smaller summed-loss, if you would display the mean loss, it will stop happening.
+        """
+        #where is the loss summed anyway ?
+
     return losses.avg, model2
 
 
@@ -487,16 +525,19 @@ def main():
     target_task = opt.target_task
 
     # build model and criterion
+    print("building model...")
     model, criterion = set_model(opt)
     model2, _ = set_model(opt)
     model2.eval()
 
     # build optimizer
+    print("setting optimizer...")
     optimizer = set_optimizer(opt, model)
 
     replay_indices = None
 
     if opt.resume_target_task is not None:
+        print("loading model...")
         load_file = os.path.join(opt.save_folder, 'last_{policy}_{target_task}.pth'.format(policy=opt.replay_policy ,target_task=opt.resume_target_task))
         model, optimizer = load_model(model, optimizer, load_file)
         if opt.resume_target_task == 0:
@@ -508,6 +549,7 @@ def main():
         print(len(replay_indices))
 
     # tensorboard
+    print("setting tensorboard...")
     logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
 
     original_epochs = opt.epochs
@@ -519,6 +561,7 @@ def main():
     else:
         opt.end_task = opt.n_cls // opt.cls_per_task
 
+    print("entering task iteration loop")
     for target_task in range(0 if opt.resume_target_task is None else opt.resume_target_task+1, opt.end_task):
 
         opt.target_task = target_task
@@ -534,8 +577,10 @@ def main():
           np.array(replay_indices))
 
         # build data loader (dynamic: 0109)
+        print("building dataloader...")
         train_loader, subset_indices = set_loader(opt, replay_indices)
 
+        print("saving model...")
         np.save(
           os.path.join(opt.log_folder, 'subset_indices_{policy}_{target_task}.npy'.format(policy=opt.replay_policy ,target_task=target_task)),
           np.array(subset_indices))
@@ -548,6 +593,7 @@ def main():
         else:
             opt.epochs = original_epochs
 
+        print("entering epochs loop")
         for epoch in range(1, opt.epochs + 1):
 
             adjust_learning_rate(opt, optimizer, epoch)
