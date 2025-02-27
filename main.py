@@ -233,8 +233,8 @@ def set_replay_samples(opt, model, prev_indices=None):
     else:
         shrink_size = ((opt.target_task - 1) * opt.mem_size / opt.target_task)
         if len(prev_indices) > 0:
-            unique_cls = np.unique(val_targets[prev_indices])
-            _prev_indices = prev_indices
+            unique_cls = np.unique(val_targets[prev_indices]) #distinct classes
+            _prev_indices = prev_indices #storing old prev_indices
             prev_indices = []
 
             for c in unique_cls:
@@ -246,6 +246,7 @@ def set_replay_samples(opt, model, prev_indices=None):
                 else:
                     size_for_c = math.floor(size_for_c)
 
+                # dataset is built as a union of current task samples and buffered samples, without any oversampling
                 prev_indices += torch.tensor(_prev_indices)[mask][torch.randperm(mask.sum())[:size_for_c]].tolist()
 
             print(np.unique(val_targets[prev_indices], return_counts=True))

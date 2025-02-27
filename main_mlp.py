@@ -31,19 +31,6 @@ from util import set_optimizer, save_model, load_model
 from networks.resnet_extended import SupConResNet
 from losses_negative_only import SupConLoss
 
-from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
-from pytorch_grad_cam.utils.image import show_cam_on_image
-from matplotlib import pyplot as plt
-from PIL import Image
-
-
-'''try:
-    import apex
-    from apex import amp, optimizers
-except ImportError:
-    pass'''
-
 
 def parse_option():
     parser = argparse.ArgumentParser('argument for training')
@@ -362,7 +349,8 @@ def set_loader(opt, replay_indices):
     train_sampler = None
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=opt.batch_size, shuffle=(train_sampler is None),
-        num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler)
+        num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler,
+        persistent_workers = True)
 
     return train_loader, subset_indices
 
@@ -395,14 +383,7 @@ def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, model2:S
     optimizer : stochastic gradient descent for the model's parameters, with specified learning rate, momentum and weight decay
     epoch : specifies which epoch this is, to calculate a warm-up learning rate if the epoch is in warm-up phase
     """
-    global features
-
     model.train()
-
-    print("creating gradCAM...")
-    cam_layers = [model.head[-1]]
-    # Construct the CAM object once, and then re-use it on many images:
-    cam = GradCAM(model=model, target_layers=cam_layers)
 
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -417,12 +398,12 @@ def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, model2:S
         #concatenate images from both classes of the current task
         images = torch.cat([images[0], images[1]], dim=0)
         if torch.cuda.is_available():
-            print("copying images and labels to CUDA memory...")
+            #print("copying images and labels to CUDA memory...")
             images_cuda = images.cuda(non_blocking=True)
             labels = labels.cuda(non_blocking=True)
         bsz = labels.shape[0] #batch size
 
-        print("creating previous task mask...")
+       # print("creating previous task mask...")
         with torch.no_grad():
             prev_task_mask = labels < opt.target_task * opt.cls_per_task
             prev_task_mask = prev_task_mask.repeat(2)
@@ -432,20 +413,9 @@ def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, model2:S
         warmup_learning_rate(opt, epoch, idx, len(train_loader), optimizer)
 
         #forward pass
-        print("forward pass to model...")
+        #print("forward pass to model...")
         predictions, features = model(images_cuda, return_feat=True)
-        print("shape of images tensor : ", images.shape)
-        try :
-            #grad-CAM
-            grayscale_cam = cam(input_tensor=images_cuda)
-            # In this example grayscale_cam has only one image in the batch:
-            grayscale_cam = grayscale_cam[0, :]
-            visualization = show_cam_on_image(images.numpy(), grayscale_cam, use_rgb=True)
-            img = Image.fromarray(visualization, 'RGB')
-            img.save('{}/{}.png'.format(opt.cam_folder, idx))
-        except ValueError as e :
-            print(e)
-            pass
+        #print("shape of images tensor : ", images.shape)
 
         # IRD (current)
         if opt.target_task > 0:

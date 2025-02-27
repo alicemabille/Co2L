@@ -231,9 +231,9 @@ def set_replay_samples(opt, model, prev_indices=None):
     else: #original way of updating the buffer from the Co2L paper, let's not use this !
         shrink_size = ((opt.target_task - 1) * opt.mem_size / opt.target_task)
         if len(prev_indices) > 0:
-            unique_cls = np.unique(val_targets[prev_indices])
-            _prev_indices = prev_indices
-            prev_indices = []
+            unique_cls = np.unique(val_targets[prev_indices]) #distinct classes
+            _prev_indices = prev_indices #storing old prev_indices
+            prev_indices = [] 
 
             for c in unique_cls:
                 mask = val_targets[_prev_indices] == c
@@ -244,6 +244,7 @@ def set_replay_samples(opt, model, prev_indices=None):
                 else:
                     size_for_c = math.floor(size_for_c)
 
+                # dataset is built as a union of current task samples and buffered samples, without any oversampling
                 prev_indices += torch.tensor(_prev_indices)[mask][torch.randperm(mask.sum())[:size_for_c]].tolist()
 
             print(np.unique(val_targets[prev_indices], return_counts=True))
@@ -316,7 +317,7 @@ def set_loader(opt, replay_indices=None):
     if opt.dataset == 'cifar10':
         subset_indices = []
         _train_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
-                                         transform=TwoCropTransform(train_transform),
+                                         transform=TwoCropTransform(train_transform), #Create two crops of the same image
                                          download=True)
         for tc in target_classes:
             target_class_indices = np.where(np.array(_train_dataset.targets) == tc)[0]
@@ -354,7 +355,8 @@ def set_loader(opt, replay_indices=None):
     train_sampler = None
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=opt.batch_size, shuffle=(train_sampler is None),
-        num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler)
+        num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler,
+        persistent_workers=True)
 
     return train_loader, subset_indices
 
@@ -402,20 +404,26 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
     #iterating over batches
     # TODO : completely change the way dataloaders and replay samples are managed
     for idx, (images, labels) in enumerate(train_loader):
+        """
+        torch.Size([1024, 1024])        batch size = 512, logits size = batch size*2
+        learning rate :  0.0541
+        torch.Size([1024, 1024])
+        learning rate :  0.05655
+        torch.Size([544, 544])      last batch is smaller
+        Train: [1][20/20]       BT 12.868 (4.097)       DT 0.001 (1.601)        loss 44.512 (49.246 0.000)
+        """
         #TODO : add samples of replay_indices to the list of samples to add to the buffer
         #replay_samples = images[replay_indices]
+        #buffer.get_data( ????) ???
 
         data_time.update(time.time() - end)
 
-        images = torch.cat([images[0], images[1]], dim=0)
-        # create grid of images
-        img_grid = torchvision.utils.make_grid(images)
-        # write to tensorboard
-        #tensorboard_writer.add_image('some_images', img_grid) #works fine        
-
+        images = torch.cat([images[0], images[1]], dim=0) # two augmentations of the same image : images[0] has the first augmentations, images[1] has the second augmentations
         if torch.cuda.is_available():
-            images = images.cuda(non_blocking=True)
-            labels = labels.cuda(non_blocking=True)
+            images = images.cuda(non_blocking=True) # Moves the tensor to GPU memory for efficient computation, assuming the program is running on a GPU.
+            labels = labels.cuda(non_blocking=True) # non_blocking=True allows asynchronous data transfers for better performance.
+        print("images tensor : ",images.shape) #images tensor :  torch.Size([544, 3, 32, 32]) last batch
+        print("labels tensor : ",labels.shape) #labels tensor :  torch.Size([272])
         bsz = labels.shape[0]
 
         with torch.no_grad():
@@ -435,10 +443,13 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
 
             features1_sim = torch.div(torch.matmul(features1_prev_task, features1_prev_task.T), opt.current_temp)
             logits_mask = torch.scatter(
-                torch.ones_like(features1_sim),
+                torch.ones_like(features1_sim), 
                 1,
-                torch.arange(features1_sim.size(0)).view(-1, 1).cuda(non_blocking=True),
-                0
+                #Creates a tensor filled with ones that has the same shape as features1_sim. This serves as the base tensor where updates will be made.
+                torch.arange(features1_sim.size(0)).view(-1, 1).cuda(non_blocking=True), # view(-1, 1) Reshapes the tensor into a 2D column vector with shape (features1_sim.size(0), 1)
+                0 
+                #Generates a 1D tensor containing sequential integers from 0 to features1_sim.size(0) - 1.
+                #Example: If features1_sim.size(0) is 5, this will create torch.tensor([0, 1, 2, 3, 4]).
             )
             logits_max1, _ = torch.max(features1_sim * logits_mask, dim=1, keepdim=True)
             #This operation creates a mask to exclude self-similarities when calculating similarity or distance metrics. 
@@ -448,38 +459,26 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
             logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
 
         # Asym SupCon
-        f1, f2 = torch.split(features, [bsz, bsz], dim=0)
-        features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
-        loss, loss_values, mask = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
+        f1, f2 = torch.split(features, [bsz, bsz], dim=0) #f1 and f2 might be different augmentations of the same sample.
+        features1 = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1) #  each set is reshaped and combined so that every row in the batch now contains two feature vectors.
+        loss, loss_values, mask = criterion(features1, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
         #print("loss : ", loss)
         #print("loss_values : ", loss_values)
-        """
-        loss_values :  tensor([[-6.2279, -6.2281, -6.2302,  ..., -6.2522, -6.2280, -6.2287],
-        [-6.2263, -6.2261, -6.2299,  ..., -6.2546, -6.2261, -6.2279],
-        [-6.2339, -6.2354, -6.2316,  ..., -6.2433, -6.2348, -6.2320],
-        ...,
-        [-6.2474, -6.2517, -6.2349,  ..., -6.2232, -6.2503, -6.2395],
-        [-6.2268, -6.2268, -6.2300,  ..., -6.2538, -6.2267, -6.2282],
-        [-6.2314, -6.2324, -6.2310,  ..., -6.2470, -6.2320, -6.2306]],
-       device='cuda:0', grad_fn=<SubBackward0>)
-        """
 
         # update buffer using Asym SupCon loss
         if epoch > 1:
             device = conf.get_device()
-            task = (torch.ones(labels.shape[0]) * opt.target_task).to(device, dtype=torch.long)
+            #i1, i2 = torch.split(features, [bsz, bsz], dim=0) #let's not do this to not arbitrarily favor one augmentation over another
+            #let's duplicate labels instead
+            labels2 = labels.repeat(2)
+            task = (torch.ones(labels2.shape[0]) * opt.target_task).to(device, dtype=torch.long)
             # add data to buffer
             buffer.add_data(examples=images,
-                                labels=labels,
-                                task_labels=mask*images, # TODO : find correct task labels
+                                #examples=i1,
+                                labels=labels2,
+                                task_labels=task,
                                 logits=features,
                                 loss_values=loss_values)
-        """
-        task_labels=mask*images,
-                    ~~~~^~~~~~~
-        RuntimeError: The size of tensor a (512) must match the size of tensor b (32) at non-singleton dimension 3
-        """
-
 
         # IRD (past)
         if opt.target_task > 0:

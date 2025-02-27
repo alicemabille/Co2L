@@ -173,14 +173,15 @@ class SupConResNet(nn.Module):
             self.head = nn.Sequential(
                 nn.Linear(dim_in, dim_in),
                 nn.ReLU(inplace=True),
-                nn.Linear(dim_in, feat_dim)
+                nn.Linear(dim_in, feat_dim),
+                nn.ReLU(inplace=True)
             )
         else:
             raise NotImplementedError(
                 'head not supported: {}'.format(head))
         self.predictor = nn.Sequential(
             nn.Linear(feat_dim, extension_hidden_dim),
-            nn.ReLU(),                         # tester autre fct activation
+            nn.ReLU(inplace=True),                         # tester autre fct activation
             nn.Linear(extension_hidden_dim, feat_dim)
         )
 

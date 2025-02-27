@@ -6,3 +6,9 @@
 *.fr
 *.0
 events.out.tfevents.*
+/activate
+/Co2Lvenv
+/.ipynb_checkpoints
+/backups
+/networks/.ipynb_checkpoints
+/utils/__pycache__

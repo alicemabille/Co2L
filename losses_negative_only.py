@@ -43,8 +43,13 @@ class SupConLoss(nn.Module):
         else:
             mask = mask.float().to(device)
 
-        contrast_count = features.shape[1]
+        contrast_count = features.shape[1] # number of augmentations for 1 sample
         contrast_feature = torch.cat(torch.unbind(features, dim=1), dim=0)
+        #This splits features into a tuple (t1, t2), where:
+        #    t1 has shape (bsz, D)
+        #    t2 has shape (bsz, D)
+        #So torch.unbind(features, dim=1) returns (t1, t2)
+
         if self.contrast_mode == 'one':
             anchor_feature = features[:, 0]
             anchor_count = 1
@@ -57,10 +62,11 @@ class SupConLoss(nn.Module):
         # compute logits
         anchor_dot_contrast = torch.div(
             torch.matmul(anchor_feature, contrast_feature.T),
-            self.temperature) # exp(zi · zj/τ )
+            self.temperature) # (zi · zj/τ )
         # for numerical stability
         logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
         logits = anchor_dot_contrast - logits_max.detach()
+        print("logits shape : ",logits.shape)
 
         # tile mask
         mask = mask.repeat(anchor_count, contrast_count)
@@ -78,10 +84,12 @@ class SupConLoss(nn.Module):
         log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True)) 
         # log ( exp(zi · zj/τ ) / ∑ k6=i exp(zi · zk/τ ) ) = log(exp(zi · zj/τ )) - log(∑ k6=i exp(zi · zk/τ ))
         # = (zi · zj/τ ) - log(∑ k6=i exp(zi · zk/τ ))
+        print("log_prob shape : ",log_prob.shape)
 
         # compute mean of log-likelihood over positive
         mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1)
         # mask.sum(1) = number of positive sample for current sample xi
+        print("mean_log_prob_pos, mean of log-likelihood over positive, shape : ",mean_log_prob_pos.shape)
 
         # loss
         loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
@@ -100,5 +108,4 @@ class SupConLoss(nn.Module):
             raise ValueError('loss reduction not supported: {}'.
                              format(reduction))
 
-        return loss, log_prob, mask #TODO : choose what loss values to return for buffer management
-    #TODO : find what samples correspond to mean_log_prob_pos
+        return loss, mean_log_prob_pos, mask #TODO : choose what loss values to return for buffer management
