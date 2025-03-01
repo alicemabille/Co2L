@@ -33,7 +33,11 @@ def apply_transform(x: torch.Tensor, transform, autosqueeze=False) -> torch.Tens
         return x
     if isinstance(x, PIL.Image.Image):
         return transform(x)
-    out = torch.stack([transform(xi) for xi in x.cpu()], dim=0).to(x.device)
+    print(x[0].type())
+    if x[0].type() == "list" :
+        out = torch.stack([torch.stack(transform(xi)) for xi in x.cpu()]).to(x.device)
+    else :
+        out = torch.stack([transform(xi) for xi in x.cpu()]).to(x.device)
     if autosqueeze and out.shape[0] == 1:
         out = out.squeeze(0)
     return out

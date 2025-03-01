@@ -6,14 +6,16 @@ https://github.com/HobbitLong/SupContrast/blob/master/util.py
 from __future__ import print_function
 
 import math
+import PIL
+import PIL.Image
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Sampler
+from torchvision import transforms
 from scipy.stats import multivariate_normal
-
 
 class TwoCropTransform:
     """Create two crops of the same image"""
@@ -40,6 +42,39 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
+
+def transform(opt, type=PIL.Image) :
+    if opt.dataset == 'cifar10':
+        mean = (0.4914, 0.4822, 0.4465)
+        std = (0.2023, 0.1994, 0.2010)
+    elif opt.dataset == 'tiny-imagenet':
+        mean = (0.4802, 0.4480, 0.3975)
+        std = (0.2770, 0.2691, 0.2821)
+    elif opt.dataset == 'path':
+        mean = eval(opt.mean)
+        std = eval(opt.mean)
+    else:
+        raise ValueError('dataset not supported: {}'.format(opt.dataset))
+
+
+    normalize = transforms.Normalize(mean=mean, std=std)
+    #augment inputs
+    augments = [
+        transforms.Resize(size=(opt.size, opt.size)),
+        transforms.RandomResizedCrop(size=opt.size, scale=(0.1 if opt.dataset=='tiny-imagenet' else 0.2, 1.)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomApply([
+            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
+        ], p=0.8),
+        transforms.RandomGrayscale(p=0.2),
+        transforms.RandomApply([transforms.GaussianBlur(kernel_size=opt.size//20*2+1, sigma=(0.1, 2.0))], p=0.5 if opt.size>32 else 0.0)
+    ]
+    if type==PIL.Image :
+        augments.append(transforms.ToTensor())
+    augments.append(normalize)
+    train_transform = transforms.Compose(augments)
+    return train_transform
 
 
 def accuracy(output, target, topk=(1,)):

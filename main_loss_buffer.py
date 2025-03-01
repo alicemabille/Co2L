@@ -21,12 +21,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
-from torchvision import transforms, datasets
+from torchvision import datasets
 from torch.utils.data import Subset, Dataset
 from torch.utils.tensorboard import SummaryWriter
 
 from datasets import TinyImagenet
-from util import TwoCropTransform, AverageMeter
+from util import TwoCropTransform, AverageMeter, transform
 from util import adjust_learning_rate, warmup_learning_rate
 from util import set_optimizer, save_model, load_model
 from networks.resnet_big import SupConResNet
@@ -189,130 +189,12 @@ def parse_option():
     return opt
 
 
-def set_replay_samples(opt, model, prev_indices=None):
-
-    is_training = model.training
-    model.eval()
-
-    class IdxDataset(Dataset):
-        def __init__(self, dataset, indices):
-            self.dataset = dataset
-            self.indices = indices
-        def __len__(self):
-            return len(self.dataset)
-        def __getitem__(self, idx):
-            return self.indices[idx], self.dataset[idx]
-
-    # construct data loader
-    val_transform = transforms.Compose([
-        transforms.ToTensor(),
-    ])
-
-    if opt.dataset == 'cifar10':
-        subset_indices = []
-        val_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
-                                         transform=val_transform,
-                                         download=True)
-        val_targets = np.array(val_dataset.targets)
-
-    elif opt.dataset == 'tiny-imagenet':
-        subset_indices = []
-        val_dataset = TinyImagenet(root='{}/datasets'.format(opt.data_folder),
-                                    transform=val_transform,
-                                    download=True)
-        val_targets = val_dataset.targets
-
-    else:
-        raise ValueError('dataset not supported: {}'.format(opt.dataset))
-
-    if prev_indices is None:
-        prev_indices = []
-        observed_classes = list(range(0, opt.target_task*opt.cls_per_task))
-    else: #original way of updating the buffer from the Co2L paper, let's not use this !
-        shrink_size = ((opt.target_task - 1) * opt.mem_size / opt.target_task)
-        if len(prev_indices) > 0:
-            unique_cls = np.unique(val_targets[prev_indices]) #distinct classes
-            _prev_indices = prev_indices #storing old prev_indices
-            prev_indices = [] 
-
-            for c in unique_cls:
-                mask = val_targets[_prev_indices] == c
-                size_for_c = shrink_size / len(unique_cls)
-                p = size_for_c - (shrink_size // len(unique_cls))
-                if random.random() < p:
-                    size_for_c = math.ceil(size_for_c)
-                else:
-                    size_for_c = math.floor(size_for_c)
-
-                # dataset is built as a union of current task samples and buffered samples, without any oversampling
-                prev_indices += torch.tensor(_prev_indices)[mask][torch.randperm(mask.sum())[:size_for_c]].tolist()
-
-            print(np.unique(val_targets[prev_indices], return_counts=True))
-        observed_classes = list(range(max(opt.target_task-1, 0)*opt.cls_per_task, (opt.target_task)*opt.cls_per_task))
-
-    if len(observed_classes) == 0:
-        return prev_indices
-
-    observed_indices = []
-    for tc in observed_classes:
-        observed_indices += np.where(val_targets == tc)[0].tolist()
-
-
-    val_observed_targets = val_targets[observed_indices]
-    val_unique_cls = np.unique(val_observed_targets)
-
-
-    selected_observed_indices = []
-    for c_idx, c in enumerate(val_unique_cls):
-        size_for_c_float = ((opt.mem_size - len(prev_indices) - len(selected_observed_indices)) / (len(val_unique_cls) - c_idx))
-        p = size_for_c_float -  ((opt.mem_size - len(prev_indices) - len(selected_observed_indices)) // (len(val_unique_cls) - c_idx))
-        if random.random() < p:
-            size_for_c = math.ceil(size_for_c_float)
-        else:
-            size_for_c = math.floor(size_for_c_float)
-        mask = val_targets[observed_indices] == c
-        selected_observed_indices += torch.tensor(observed_indices)[mask][torch.randperm(mask.sum())[:size_for_c]].tolist()
-    print(np.unique(val_targets[selected_observed_indices], return_counts=True))
-
-
-    model.is_training = is_training
-
-    return prev_indices + selected_observed_indices
-
-
 def set_loader(opt, replay_indices=None):
     # construct data loader
-    if opt.dataset == 'cifar10':
-        mean = (0.4914, 0.4822, 0.4465)
-        std = (0.2023, 0.1994, 0.2010)
-    elif opt.dataset == 'tiny-imagenet':
-        mean = (0.4802, 0.4480, 0.3975)
-        std = (0.2770, 0.2691, 0.2821)
-    elif opt.dataset == 'path':
-        mean = eval(opt.mean)
-        std = eval(opt.mean)
-    else:
-        raise ValueError('dataset not supported: {}'.format(opt.dataset))
-
-
-    normalize = transforms.Normalize(mean=mean, std=std)
-    #augment inputs
-    train_transform = transforms.Compose([
-        transforms.Resize(size=(opt.size, opt.size)),
-        transforms.RandomResizedCrop(size=opt.size, scale=(0.1 if opt.dataset=='tiny-imagenet' else 0.2, 1.)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([transforms.GaussianBlur(kernel_size=opt.size//20*2+1, sigma=(0.1, 2.0))], p=0.5 if opt.size>32 else 0.0),
-        transforms.ToTensor(),
-        normalize,
-    ])
-
-
     target_classes = list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task))
     print(target_classes)
+
+    train_transform = transform(opt)
 
     if opt.dataset == 'cifar10':
         subset_indices = []
@@ -397,12 +279,9 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
 
     end = time.time()
 
-    # acquire replay sample indices
-    # TODO : choose which data to add !
-    #replay_indices = set_replay_samples(opt, model)
+    train_transform = transform(opt, torch.Tensor)
 
     #iterating over batches
-    # TODO : completely change the way dataloaders and replay samples are managed
     for idx, (images, labels) in enumerate(train_loader):
         """
         torch.Size([1024, 1024])        batch size = 512, logits size = batch size*2
@@ -412,18 +291,20 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
         torch.Size([544, 544])      last batch is smaller
         Train: [1][20/20]       BT 12.868 (4.097)       DT 0.001 (1.601)        loss 44.512 (49.246 0.000)
         """
-        #TODO : add samples of replay_indices to the list of samples to add to the buffer
-        #replay_samples = images[replay_indices]
-        #buffer.get_data( ????) ???
 
         data_time.update(time.time() - end)
+
+        if opt.target_task > 0: # add buffered samples to new task samples
+            #original LWS code sets get_data(size=minibatch_size), why ?
+            images = torch.cat([images, buffer.get_data(opt.mem_size, transform=TwoCropTransform(train_transform))], dim=0) #buffered data is not shuffled with the rest + this 
+            labels = torch.cat([labels, buffer.get_task_labels], dim=0)
 
         images = torch.cat([images[0], images[1]], dim=0) # two augmentations of the same image : images[0] has the first augmentations, images[1] has the second augmentations
         if torch.cuda.is_available():
             images = images.cuda(non_blocking=True) # Moves the tensor to GPU memory for efficient computation, assuming the program is running on a GPU.
             labels = labels.cuda(non_blocking=True) # non_blocking=True allows asynchronous data transfers for better performance.
-        print("images tensor : ",images.shape) #images tensor :  torch.Size([544, 3, 32, 32]) last batch
-        print("labels tensor : ",labels.shape) #labels tensor :  torch.Size([272])
+        #print("images tensor : ",images.shape) #images tensor :  torch.Size([544, 3, 32, 32]) last batch
+        #print("labels tensor : ",labels.shape) #labels tensor :  torch.Size([272])
         bsz = labels.shape[0]
 
         with torch.no_grad():
@@ -509,7 +390,7 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
         end = time.time()
 
         # print info
-        if (idx + 1) % opt.print_freq == 0 or idx+1 == len(train_loader):
+        if ((idx+1)*2) % opt.print_freq == 0 or ((idx+1)*2) == len(train_loader): #TODO : change idx
             print('Train: [{0}][{1}/{2}]\t'
                   'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
@@ -601,7 +482,6 @@ def main():
 
             # train for one epoch
             time1 = time.time()
-            # TODO : do we need to return the buffer here or is it updated when modified in-function ?
             loss, model2 = train(train_loader, model, model2, criterion, optimizer, epoch, opt, buffer)
             time2 = time.time()
             print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
@@ -609,10 +489,6 @@ def main():
             # tensorboard logger
             logger.log_value('loss_{target_task}'.format(target_task=target_task), loss, epoch)
             logger.log_value('learning_rate_{target_task}'.format(target_task=target_task), optimizer.param_groups[0]['lr'], epoch)
-
-        example_images = train_loader[0][0]
-        example_images = torch.cat([example_images[0], example_images[1]], dim=0)
-        tensorboard_writer.add_graph(model, example_images)
 
 
         ####### END OF TASK ##########

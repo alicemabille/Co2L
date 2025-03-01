@@ -66,7 +66,7 @@ class SupConLoss(nn.Module):
         # for numerical stability
         logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
         logits = anchor_dot_contrast - logits_max.detach()
-        print("logits shape : ",logits.shape)
+        #print("logits shape : ",logits.shape)
 
         # tile mask
         mask = mask.repeat(anchor_count, contrast_count)
@@ -84,12 +84,12 @@ class SupConLoss(nn.Module):
         log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True)) 
         # log ( exp(zi · zj/τ ) / ∑ k6=i exp(zi · zk/τ ) ) = log(exp(zi · zj/τ )) - log(∑ k6=i exp(zi · zk/τ ))
         # = (zi · zj/τ ) - log(∑ k6=i exp(zi · zk/τ ))
-        print("log_prob shape : ",log_prob.shape)
+        #print("log_prob shape : ",log_prob.shape)
 
         # compute mean of log-likelihood over positive
         mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1)
         # mask.sum(1) = number of positive sample for current sample xi
-        print("mean_log_prob_pos, mean of log-likelihood over positive, shape : ",mean_log_prob_pos.shape)
+        #print("mean_log_prob_pos, mean of log-likelihood over positive, shape : ",mean_log_prob_pos.shape)
 
         # loss
         loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos

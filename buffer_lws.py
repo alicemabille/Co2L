@@ -185,7 +185,6 @@ class Buffer(Dataset):
 
         if transform is None:
             def transform(x): return x
-        #TODO : adapt data transform to Co2L. Maybe not use any transform here.
         ret_tuple = (apply_transform(self.examples[choice], transform=transform).to(target_device),)
 
         for attr_str in self.attributes[1:]:
