@@ -431,7 +431,7 @@ def train(train_loader, model, model2, criterion, optimizer, epoch, opt):
         # Asym SupCon
         f1, f2 = torch.split(features, [bsz, bsz], dim=0)
         features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
-        loss = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
+        loss, loss_values = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
 
         # IRD (past)
         if opt.target_task > 0:

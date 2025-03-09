@@ -14,12 +14,12 @@ import torch.nn.functional as F
 from torchvision.transforms import functional as TF
 from torchvision import transforms
 
+from util import TwoCropTransform
+
+
 
 def apply_transform(x: torch.Tensor, transform, autosqueeze=False) -> torch.Tensor:
     """Applies a transform to a batch of images.
-
-    If the transforms is a KorniaAugNoGrad, it is applied directly to the batch.
-    Otherwise, it is applied to each image in the batch.
 
     Args:
         x: a batch of images.
@@ -33,11 +33,21 @@ def apply_transform(x: torch.Tensor, transform, autosqueeze=False) -> torch.Tens
         return x
     if isinstance(x, PIL.Image.Image):
         return transform(x)
-    print(x[0].type())
-    if x[0].type() == "list" :
-        out = torch.stack([torch.stack(transform(xi)) for xi in x.cpu()]).to(x.device)
-    else :
-        out = torch.stack([transform(xi) for xi in x.cpu()]).to(x.device)
+    
+    # Check if the transform is an instance of TwoCropTransform
+    if isinstance(transform, TwoCropTransform):
+        # Apply the transform to each image in the batch
+        out = [torch.stack([transform(xi)[i] for xi in x.cpu()]).to(x.device) for i in range(2)]
+        
+        # If autosqueeze is True and the batch size is 1, squeeze the output
+        if autosqueeze and out[0].shape[0] == 1:
+            out = [o.squeeze(0) for o in out]
+        
+        return out
+    
+    # Handle the case where the transform is not TwoCropTransform
+    out = torch.stack([transform(xi) for xi in x.cpu()]).to(x.device)
+        
     if autosqueeze and out.shape[0] == 1:
         out = out.squeeze(0)
     return out

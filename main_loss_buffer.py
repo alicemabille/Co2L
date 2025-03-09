@@ -43,8 +43,6 @@ def parse_option():
 
     parser.add_argument('--end_task', type=int, default=None)
 
-    parser.add_argument('--replay_policy', type=str, choices=['random'], default='random')
-
     parser.add_argument('--mem_size', type=int, default=200) #buffer size
     parser.add_argument('--n_bin', type=int, default=4) #buffer bins
 
@@ -100,9 +98,6 @@ def parse_option():
     # other setting
     parser.add_argument('--cosine', action='store_true',
                         help='using cosine annealing')
-    #TODO : delete all this batch normalization thing
-    parser.add_argument('--syncBN', action='store_true',
-                        help='using synchronized batch normalization')
     parser.add_argument('--warm', action='store_true',
                         help='warm-up for large batch training')
     parser.add_argument('--trial', type=str, default='0',
@@ -134,13 +129,10 @@ def parse_option():
     # set the path according to the environment
     if opt.data_folder is None:
         opt.data_folder = '~/data/'
-    """opt.model_path = './save_{}_{}/{}_models'.format(opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.tb_path = './save_{}_{}/{}_tensorboard'.format(opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.log_path = './save_{}_{}/logs'.format(opt.replay_policy, opt.mem_size, opt.dataset)"""
 
-    opt.model_path = '{}/save_{}_{}/{}_models'.format(opt.data_folder , opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.tb_path = '{}/save_{}_{}/{}_tensorboard'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.log_path = '{}/save_{}_{}/logs'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.model_path = '{}/save_loss_buffer_{}/{}_models'.format(opt.data_folder, opt.mem_size, opt.dataset)
+    opt.tb_path = '{}/save_loss_buffer_{}/{}_tensorboard'.format(opt.data_folder, opt.mem_size, opt.dataset)
+    opt.log_path = '{}/save_loss_buffer_{}/logs'.format(opt.data_folder, opt.mem_size, opt.dataset)
 
     iterations = opt.lr_decay_epochs.split(',')
     opt.lr_decay_epochs = list([])
@@ -189,7 +181,7 @@ def parse_option():
     return opt
 
 
-def set_loader(opt, replay_indices=None):
+def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
     # construct data loader
     target_classes = list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task))
     print(target_classes)
@@ -205,7 +197,13 @@ def set_loader(opt, replay_indices=None):
             target_class_indices = np.where(np.array(_train_dataset.targets) == tc)[0]
             subset_indices += np.where(np.array(_train_dataset.targets) == tc)[0].tolist()
 
-        #subset_indices += replay_indices
+        # Add buffer data if available
+        if buffer is not None and opt.target_task > 0:
+            buffer_data, buffer_labels = buffer.get_data(opt.mem_size, transform=TwoCropTransform(train_transform))
+            buffer_dataset = torch.utils.data.TensorDataset(buffer_data, buffer_labels)
+            train_dataset = torch.utils.data.ConcatDataset([Subset(_train_dataset, subset_indices), buffer_dataset])
+        else:
+            train_dataset = Subset(_train_dataset, subset_indices)
 
         train_dataset =  Subset(_train_dataset, subset_indices)
         print('Dataset size: {}'.format(len(subset_indices)))
@@ -221,7 +219,13 @@ def set_loader(opt, replay_indices=None):
             target_class_indices = np.where(_train_dataset.targets == tc)[0]
             subset_indices += np.where(_train_dataset.targets == tc)[0].tolist()
 
-        #subset_indices += replay_indices
+        # Add buffer data if available
+        if buffer is not None and opt.target_task > 0:
+            buffer_data, buffer_labels = buffer.get_data(opt.mem_size, transform=TwoCropTransform(train_transform))
+            buffer_dataset = torch.utils.data.TensorDataset(buffer_data, buffer_labels)
+            train_dataset = torch.utils.data.ConcatDataset([Subset(_train_dataset, subset_indices), buffer_dataset])
+        else:
+            train_dataset = Subset(_train_dataset, subset_indices)
 
         train_dataset =  Subset(_train_dataset, subset_indices)
         print('Dataset size: {}'.format(len(subset_indices)))
@@ -279,25 +283,10 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
 
     end = time.time()
 
-    train_transform = transform(opt, torch.Tensor)
-
     #iterating over batches
     for idx, (images, labels) in enumerate(train_loader):
-        """
-        torch.Size([1024, 1024])        batch size = 512, logits size = batch size*2
-        learning rate :  0.0541
-        torch.Size([1024, 1024])
-        learning rate :  0.05655
-        torch.Size([544, 544])      last batch is smaller
-        Train: [1][20/20]       BT 12.868 (4.097)       DT 0.001 (1.601)        loss 44.512 (49.246 0.000)
-        """
 
         data_time.update(time.time() - end)
-
-        if opt.target_task > 0: # add buffered samples to new task samples
-            #original LWS code sets get_data(size=minibatch_size), why ?
-            images = torch.cat([images, buffer.get_data(opt.mem_size, transform=TwoCropTransform(train_transform))], dim=0) #buffered data is not shuffled with the rest + this 
-            labels = torch.cat([labels, buffer.get_task_labels], dim=0)
 
         images = torch.cat([images[0], images[1]], dim=0) # two augmentations of the same image : images[0] has the first augmentations, images[1] has the second augmentations
         if torch.cuda.is_available():
@@ -342,7 +331,7 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
         # Asym SupCon
         f1, f2 = torch.split(features, [bsz, bsz], dim=0) #f1 and f2 might be different augmentations of the same sample.
         features1 = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1) #  each set is reshaped and combined so that every row in the batch now contains two feature vectors.
-        loss, loss_values, mask = criterion(features1, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
+        loss, loss_values = criterion(features1, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
         #print("loss : ", loss)
         #print("loss_values : ", loss_values)
 
@@ -390,7 +379,7 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
         end = time.time()
 
         # print info
-        if ((idx+1)*2) % opt.print_freq == 0 or ((idx+1)*2) == len(train_loader): #TODO : change idx
+        if (idx + 1) % opt.print_freq == 0 or idx+1 == len(train_loader):
             print('Train: [{0}][{1}/{2}]\t'
                   'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
@@ -424,13 +413,13 @@ def main():
     #replay_indices = None
 
     if opt.resume_target_task is not None:
-        load_file = os.path.join(opt.save_folder, 'last_{policy}_{target_task}.pth'.format(policy=opt.replay_policy ,target_task=opt.resume_target_task))
+        load_file = os.path.join(opt.save_folder, 'last_loss_buffer_{target_task}.pth'.format(target_task=opt.resume_target_task))
         model, optimizer = load_model(model, optimizer, load_file)
         """if opt.resume_target_task == 0:
             replay_indices = []
         else:
             replay_indices = np.load(
-              os.path.join(opt.log_folder, 'replay_indices_{policy}_{target_task}.npy'.format(policy=opt.replay_policy ,target_task=opt.resume_target_task))
+              os.path.join(opt.log_folder, 'replay_indices_loss_buffer_{target_task}.pth'.format(target_task=opt.resume_target_task))
             ).tolist()
         print(len(replay_indices))"""
 
@@ -456,17 +445,14 @@ def main():
 
         print('Start Training current task {}'.format(opt.target_task))
 
-        #TODO : replace with buffer saving
-        """np.save(
-          os.path.join(opt.log_folder, 'replay_indices_{policy}_{target_task}.npy'.format(policy=opt.replay_policy ,target_task=target_task)),
-          np.array(replay_indices))"""
+        #TODO : buffer saving
 
         # build data loader (dynamic: 0109)
         train_loader, subset_indices = set_loader(opt)
 
 
         np.save(
-          os.path.join(opt.log_folder, 'subset_indices_{policy}_{target_task}.npy'.format(policy=opt.replay_policy ,target_task=target_task)),
+          os.path.join(opt.log_folder, 'subset_indices_loss_buffer_{target_task}.npy'.format(target_task=target_task)),
           np.array(subset_indices))
 
 
@@ -494,7 +480,7 @@ def main():
         ####### END OF TASK ##########
         # save the last model
         save_file = os.path.join(
-            opt.save_folder, 'last_{policy}_{target_task}.pth'.format(policy=opt.replay_policy ,target_task=target_task))
+            opt.save_folder, 'last_loss_buffer_{target_task}.pth'.format(target_task=target_task))
         save_model(model, optimizer, opt, opt.epochs, save_file)
 
         #reset buffer bins
