@@ -26,13 +26,13 @@ from torch.utils.data import Subset, Dataset
 from torch.utils.tensorboard import SummaryWriter
 
 from datasets import TinyImagenet
-from util import TwoCropTransform, AverageMeter, transform
-from util import adjust_learning_rate, warmup_learning_rate
-from util import set_optimizer, save_model, load_model
+from utils.util import TwoCropTransform, AverageMeter, transform
+from utils.util import adjust_learning_rate, warmup_learning_rate
+from utils.util import set_optimizer, save_model, load_model
 from networks.resnet_big import SupConResNet
 from losses_negative_only import SupConLoss
-from buffer_lws import Buffer
-import conf
+from utils.lws_buffer import Buffer
+import utils.conf as conf
 
 def parse_option():
     parser = argparse.ArgumentParser('argument for training')
@@ -104,6 +104,14 @@ def parse_option():
                         help='id for recording multiple runs')
 
     opt = parser.parse_args()
+
+    if opt.end_task is not None:
+        if opt.resume_target_task is not None:
+            assert opt.end_task > opt.resume_target_task
+            opt.end_task = min(opt.end_task+1, opt.n_cls // opt.cls_per_task)
+        else:
+            opt.end_task = opt.n_cls // opt.cls_per_task
+
 
     opt.save_freq = opt.epochs // 2
 
@@ -199,8 +207,12 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
 
         # Add buffer data if available
         if buffer is not None and opt.target_task > 0:
-            buffer_data, buffer_labels = buffer.get_data(opt.mem_size, transform=TwoCropTransform(train_transform))
-            buffer_dataset = torch.utils.data.TensorDataset(buffer_data, buffer_labels)
+            # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
+            buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor)))
+            print('shape of buffer data : ', buffer_data[0].shape)
+            print('shape of buffer labels : ', buffer_data[1].shape)
+            print('number of buffered samples : ', buffer.num_examples)
+            buffer_dataset = torch.utils.data.TensorDataset(buffer_data[0], buffer_data[1]) 
             train_dataset = torch.utils.data.ConcatDataset([Subset(_train_dataset, subset_indices), buffer_dataset])
         else:
             train_dataset = Subset(_train_dataset, subset_indices)
@@ -221,8 +233,12 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
 
         # Add buffer data if available
         if buffer is not None and opt.target_task > 0:
-            buffer_data, buffer_labels = buffer.get_data(opt.mem_size, transform=TwoCropTransform(train_transform))
-            buffer_dataset = torch.utils.data.TensorDataset(buffer_data, buffer_labels)
+           # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
+            buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor)))
+            print('shape of buffer data : ', buffer_data[0].shape)
+            print('shape of buffer labels : ', buffer_data[1].shape)
+            print('number of buffered samples : ', buffer.num_examples)
+            buffer_dataset = torch.utils.data.TensorDataset(buffer_data[0], buffer_data[1]) 
             train_dataset = torch.utils.data.ConcatDataset([Subset(_train_dataset, subset_indices), buffer_dataset])
         else:
             train_dataset = Subset(_train_dataset, subset_indices)
@@ -410,18 +426,14 @@ def main():
     # build optimizer
     optimizer = set_optimizer(opt, model)
 
-    #replay_indices = None
-
     if opt.resume_target_task is not None:
         load_file = os.path.join(opt.save_folder, 'last_loss_buffer_{target_task}.pth'.format(target_task=opt.resume_target_task))
         model, optimizer = load_model(model, optimizer, load_file)
-        """if opt.resume_target_task == 0:
-            replay_indices = []
-        else:
-            replay_indices = np.load(
-              os.path.join(opt.log_folder, 'replay_indices_loss_buffer_{target_task}.pth'.format(target_task=opt.resume_target_task))
-            ).tolist()
-        print(len(replay_indices))"""
+        if opt.resume_target_task != 0:
+           buffer.load(
+              os.path.join(opt.log_folder, 'loss_buffer_{target_task}.pth'.format(target_task=target_task))
+            )
+        print('number of buffered samples : ', buffer.num_examples)
 
     ########################## TENSORBOARD #############################
     logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
@@ -431,13 +443,6 @@ def main():
 
     original_epochs = opt.epochs
 
-    if opt.end_task is not None:
-        if opt.resume_target_task is not None:
-            assert opt.end_task > opt.resume_target_task
-        opt.end_task = min(opt.end_task+1, opt.n_cls // opt.cls_per_task)
-    else:
-        opt.end_task = opt.n_cls // opt.cls_per_task
-
     for target_task in range(0 if opt.resume_target_task is None else opt.resume_target_task+1, opt.end_task):
 
         opt.target_task = target_task
@@ -445,10 +450,8 @@ def main():
 
         print('Start Training current task {}'.format(opt.target_task))
 
-        #TODO : buffer saving
-
         # build data loader (dynamic: 0109)
-        train_loader, subset_indices = set_loader(opt)
+        train_loader, subset_indices = set_loader(opt, buffer)
 
 
         np.save(
@@ -482,6 +485,9 @@ def main():
         save_file = os.path.join(
             opt.save_folder, 'last_loss_buffer_{target_task}.pth'.format(target_task=target_task))
         save_model(model, optimizer, opt, opt.epochs, save_file)
+
+        # save buffered samples
+        buffer.save(os.path.join(opt.log_folder, 'loss_buffer_{target_task}.pth'.format(target_task=target_task)))
 
         #reset buffer bins
         buffer.reset_bins()

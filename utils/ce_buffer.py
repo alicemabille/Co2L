@@ -17,7 +17,7 @@ from torchvision import transforms, datasets
 from datasets import TinyImagenet
 
 
-def set_loader(opt, replay_indices):
+def set_loader(opt, replay_indices=None):
     # construct data loader
     if opt.dataset == 'cifar10':
         mean = (0.4914, 0.4822, 0.4465)
@@ -59,7 +59,8 @@ def set_loader(opt, replay_indices):
         _train_targets = np.array(_train_dataset.targets)
         for tc in range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task):
             subset_indices += np.where(np.array(_train_dataset.targets) == tc)[0].tolist()
-        subset_indices += replay_indices.tolist()
+        if replay_indices is not None :
+            subset_indices += replay_indices.tolist()
 
         ut, uc = np.unique(_train_targets[subset_indices], return_counts=True)
         print(ut)
@@ -88,7 +89,8 @@ def set_loader(opt, replay_indices):
         _train_targets = np.array(_train_dataset.targets)
         for tc in range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task):
             subset_indices += np.where(np.array(_train_dataset.targets) == tc)[0].tolist()
-        subset_indices += replay_indices.tolist()
+        if replay_indices is not None :
+            subset_indices += replay_indices.tolist()
 
         ut, uc = np.unique(_train_targets[subset_indices], return_counts=True)
         print(ut)

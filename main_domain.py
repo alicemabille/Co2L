@@ -23,9 +23,9 @@ import torchvision
 from torchvision import transforms, datasets
 from torch.utils.data import Subset, Dataset, WeightedRandomSampler, ConcatDataset
 
-from util import TwoCropTransform, AverageMeter
-from util import adjust_learning_rate, warmup_learning_rate
-from util import set_optimizer, save_model, load_model
+from utils.util import TwoCropTransform, AverageMeter
+from utils.util import adjust_learning_rate, warmup_learning_rate
+from utils.util import set_optimizer, save_model, load_model
 from networks.mlp import SupConMLP
 from losses_negative_only import SupConLoss
 

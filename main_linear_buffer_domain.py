@@ -16,9 +16,9 @@ import torch
 import torch.backends.cudnn as cudnn
 
 from main_ce_buffer_domain import set_loader
-from util import AverageMeter
-from util import adjust_learning_rate, warmup_learning_rate, accuracy
-from util import set_optimizer
+from utils.util import AverageMeter
+from utils.util import adjust_learning_rate, warmup_learning_rate, accuracy
+from utils.util import set_optimizer
 from networks.mlp import SupConMLP, LinearClassifier
 from torch.utils.tensorboard import SummaryWriter
 

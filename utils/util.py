@@ -77,6 +77,49 @@ def transform(opt, type=PIL.Image) :
     return train_transform
 
 
+def apply_transform(x: torch.Tensor, transform, autosqueeze=False, y:torch.Tensor=None) -> torch.Tensor:
+    """Applies a transform to a batch of images.
+
+    Args:
+        x: a batch of images.
+        transform: the transform to apply.
+        autosqueeze: whether to automatically squeeze the output tensor.
+
+    Returns:
+        The transformed batch of images.
+    """
+    if transform is None:
+        return x
+    if isinstance(x, PIL.Image.Image):
+        return transform(x)
+    
+    # Check if the transform is an instance of TwoCropTransform
+    if isinstance(transform, TwoCropTransform):
+        # Apply the transform to each image in the batch
+        out = [torch.stack([transform(xi)[i] for xi in x.cpu()]).to(x.device) for i in range(2)]
+        
+        # If autosqueeze is True and the batch size is 1, squeeze the output
+        if autosqueeze and out[0].shape[0] == 1:
+            out = [o.squeeze(0) for o in out]
+        out = torch.cat(out)
+        print('shape of transformed batch of images : ', out.shape)
+
+        if y != None :
+            print('doubling labels')
+            y = y.repeat(2)
+            print('shape of labels', y.shape)
+            return (out, y)
+
+        return out
+    
+    # Handle the case where the transform is not TwoCropTransform
+    out = torch.stack([transform(xi) for xi in x.cpu()]).to(x.device)
+        
+    if autosqueeze and out.shape[0] == 1:
+        out = out.squeeze(0)
+    return out
+
+
 def accuracy(output, target, topk=(1,)):
     """Computes the accuracy over the k top predictions for the specified values of k"""
     with torch.no_grad():

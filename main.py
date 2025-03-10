@@ -24,9 +24,9 @@ from torchvision import transforms, datasets
 from torch.utils.data import Subset, Dataset
 
 from datasets import TinyImagenet
-from util import TwoCropTransform, AverageMeter
-from util import adjust_learning_rate, warmup_learning_rate
-from util import set_optimizer, save_model, load_model
+from utils.util import TwoCropTransform, AverageMeter
+from utils.util import adjust_learning_rate, warmup_learning_rate
+from utils.util import set_optimizer, save_model, load_model
 from networks.resnet_big import SupConResNet
 from losses_negative_only import SupConLoss
 
