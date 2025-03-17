@@ -132,6 +132,8 @@ class Buffer(Dataset):
         rix = []
         for i in range(examples.shape[0]):
             index = self.reservoir_bin_loss(loss_values[i]) #choosing which samples to store
+            if index>-1 :
+                print('adding data to buffer at index ', index)
             self.num_seen_examples += 1
             if index >= 0:
                 self.num_examples += 1
@@ -196,14 +198,16 @@ class Buffer(Dataset):
         # if augmented data has modified labels (ex with TwoCropTransform: double the data, double the labels)
         if isinstance(augmented_data, tuple) :
             ret_tuple = (augmented_data[0].to(target_device),)
+            double = True
         else : # base case
             ret_tuple = (augmented_data.to(target_device),)
+            double = False
         #print('ret_tuple = ', ret_tuple)
 
         for attr_str in self.attributes[1:]:
             if hasattr(self, attr_str):
                 print(f'adding {attr_str} attribute to buffer get_data() return tuple')
-                if attr_str=='labels' : #and isinstance(augmented_data, tuple) :
+                if attr_str=='labels' and double: #and isinstance(augmented_data, tuple) :
                     #print('replacing buffer labels with augmented labels')
                     #attr = augmented_data[1].to(target_device) # labels of augmented data
                     print('doubling labels')
@@ -340,7 +344,8 @@ def set_loader(opt, buffer:Buffer=None):
         # Add buffer data if available
         if buffer is not None and opt.target_task > 0:
             # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
-            buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor)))
+            #buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor))) #don't do this : buffered samples are already augmented !
+            buffer_data = buffer.get_data(opt.mem_size)
             print('shape of buffer data : ', buffer_data[0].shape)
             print('shape of buffer labels : ', buffer_data[1].shape)
             print('number of buffered samples : ', buffer.num_examples)
@@ -369,7 +374,8 @@ def set_loader(opt, buffer:Buffer=None):
          # Add buffer data if available
         if buffer is not None and opt.target_task > 0:
             # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
-            buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor)))
+            #buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor))) #don't do this : buffered samples are already augmented !
+            buffer_data = buffer.get_data(opt.mem_size)
             print('shape of buffer data : ', buffer_data[0].shape)
             print('shape of buffer labels : ', buffer_data[1].shape)
             print('number of buffered samples : ', buffer.num_examples)

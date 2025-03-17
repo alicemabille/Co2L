@@ -248,6 +248,7 @@ def validate(val_loader, model, classifier, criterion, opt):
                 correct_task += (output[mask, (tc // opt.cls_per_task) * opt.cls_per_task : ((tc // opt.cls_per_task)+1) * opt.cls_per_task].argmax(1) == (tc % opt.cls_per_task)).float().sum()
 
             for c in cls_list:
+                print("class ", c)
                 mask = labels == c
                 corr[c] += correct_all[mask].float().sum().item()
                 cnt[c] += mask.float().sum().item()
@@ -276,7 +277,7 @@ def main():
                             n_bin=opt.n_bin)
 
     if opt.target_task is not None:
-        if opt.target_task != 0:
+        if opt.target_task > 0:
             buffer.load(os.path.join(opt.logpt, f'loss_buffer_{opt.target_task}.pth'))
         print('number of buffered samples : ', buffer.num_examples)
 

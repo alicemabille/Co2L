@@ -13,3 +13,4 @@ events.out.tfevents.*
 /networks/.ipynb_checkpoints
 /utils/__pycache__
 buffer_test.py
+*.pth

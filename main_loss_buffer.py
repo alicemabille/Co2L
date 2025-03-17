@@ -45,6 +45,7 @@ def parse_option():
 
     parser.add_argument('--mem_size', type=int, default=200) #buffer size
     parser.add_argument('--n_bin', type=int, default=4) #buffer bins
+    #parser.add_argument('--reset_bins', action='store_true') #reset buffer's loss bins budget at the end of every task ?
 
     parser.add_argument('--cls_per_task', type=int, default=2)
 
@@ -105,14 +106,6 @@ def parse_option():
 
     opt = parser.parse_args()
 
-    if opt.end_task is not None:
-        if opt.resume_target_task is not None:
-            assert opt.end_task > opt.resume_target_task
-            opt.end_task = min(opt.end_task+1, opt.n_cls // opt.cls_per_task)
-        else:
-            opt.end_task = opt.n_cls // opt.cls_per_task
-
-
     opt.save_freq = opt.epochs // 2
 
 
@@ -126,6 +119,13 @@ def parse_option():
         opt.size = 64
     else:
         pass
+
+    if opt.end_task is not None:
+        if opt.resume_target_task is not None:
+            assert opt.end_task > opt.resume_target_task
+            opt.end_task = min(opt.end_task+1, opt.n_cls // opt.cls_per_task)
+    else:
+        opt.end_task = opt.n_cls // opt.cls_per_task
 
 
     # check if dataset is path that passed required arguments
@@ -207,8 +207,9 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
 
         # Add buffer data if available
         if buffer is not None and opt.target_task > 0:
-            # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
-            buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor)))
+           # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
+            #buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor))) #don't do this : buffered samples are already augmented !
+            buffer_data = buffer.get_data(opt.mem_size)
             print('shape of buffer data : ', buffer_data[0].shape)
             print('shape of buffer labels : ', buffer_data[1].shape)
             print('number of buffered samples : ', buffer.num_examples)
@@ -217,7 +218,6 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
         else:
             train_dataset = Subset(_train_dataset, subset_indices)
 
-        train_dataset =  Subset(_train_dataset, subset_indices)
         print('Dataset size: {}'.format(len(subset_indices)))
         uk, uc = np.unique(np.array(_train_dataset.targets)[subset_indices], return_counts=True)
         print(uc[np.argsort(uk)])
@@ -234,7 +234,8 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
         # Add buffer data if available
         if buffer is not None and opt.target_task > 0:
            # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
-            buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor)))
+            #buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor))) #don't do this : buffered samples are already augmented !
+            buffer_data = buffer.get_data(opt.mem_size)
             print('shape of buffer data : ', buffer_data[0].shape)
             print('shape of buffer labels : ', buffer_data[1].shape)
             print('number of buffered samples : ', buffer.num_examples)
@@ -243,7 +244,6 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
         else:
             train_dataset = Subset(_train_dataset, subset_indices)
 
-        train_dataset =  Subset(_train_dataset, subset_indices)
         print('Dataset size: {}'.format(len(subset_indices)))
         uk, uc = np.unique(np.array(_train_dataset.targets)[subset_indices], return_counts=True)
         print(uc[np.argsort(uk)])
@@ -352,19 +352,18 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
         #print("loss_values : ", loss_values)
 
         # update buffer using Asym SupCon loss
-        if epoch > 1:
-            device = conf.get_device()
-            #i1, i2 = torch.split(features, [bsz, bsz], dim=0) #let's not do this to not arbitrarily favor one augmentation over another
-            #let's duplicate labels instead
-            labels2 = labels.repeat(2)
-            task = (torch.ones(labels2.shape[0]) * opt.target_task).to(device, dtype=torch.long)
-            # add data to buffer
-            buffer.add_data(examples=images,
-                                #examples=i1,
-                                labels=labels2,
-                                task_labels=task,
-                                logits=features,
-                                loss_values=loss_values)
+        device = conf.get_device()
+        #i1, i2 = torch.split(features, [bsz, bsz], dim=0) #let's not do this to not arbitrarily favor one augmentation over another
+        #let's duplicate labels instead
+        #labels2 = labels.repeat(2)
+        task = (torch.ones(labels.shape[0]) * opt.target_task).to(device, dtype=torch.long)
+        # add data to buffer
+        buffer.add_data(examples=images,
+                            #examples=i1,
+                            labels=labels,
+                            task_labels=task,
+                            logits=features,
+                            loss_values=loss_values)
 
         # IRD (past)
         if opt.target_task > 0:
@@ -429,10 +428,9 @@ def main():
     if opt.resume_target_task is not None:
         load_file = os.path.join(opt.save_folder, 'last_loss_buffer_{target_task}.pth'.format(target_task=opt.resume_target_task))
         model, optimizer = load_model(model, optimizer, load_file)
-        if opt.resume_target_task != 0:
-           buffer.load(
-              os.path.join(opt.log_folder, 'loss_buffer_{target_task}.pth'.format(target_task=target_task))
-            )
+        buffer.load(
+            os.path.join(opt.log_folder, 'loss_buffer_{target_task}.pth'.format(target_task=target_task))
+        )
         print('number of buffered samples : ', buffer.num_examples)
 
     ########################## TENSORBOARD #############################
@@ -489,6 +487,7 @@ def main():
         # save buffered samples
         buffer.save(os.path.join(opt.log_folder, 'loss_buffer_{target_task}.pth'.format(target_task=target_task)))
 
+        #if opt.reset_bins :
         #reset buffer bins
         buffer.reset_bins()
     tensorboard_writer.close()
