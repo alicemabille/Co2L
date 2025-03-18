@@ -14,3 +14,8 @@ events.out.tfevents.*
 /utils/__pycache__
 buffer_test.py
 *.pth
+/env
+/.vscode
+*.code-workspace
+*.pyc
+/tests

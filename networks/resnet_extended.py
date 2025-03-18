@@ -181,8 +181,11 @@ class SupConResNet(nn.Module):
                 'head not supported: {}'.format(head))
         self.predictor = nn.Sequential(
             nn.Linear(feat_dim, extension_hidden_dim),
+            nn.BatchNorm1d(extension_hidden_dim),
             nn.ReLU(inplace=True),                         # tester autre fct activation
-            nn.Linear(extension_hidden_dim, feat_dim)
+            nn.Linear(extension_hidden_dim, feat_dim),
+            nn.ReLU(inplace=True)
+
         )
 
     def reinit_head(self):

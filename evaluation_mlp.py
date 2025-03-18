@@ -15,13 +15,12 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 
-from utils import conf
-from utils.lws_buffer import Buffer, set_loader
+from utils.ce_buffer import set_loader
 from utils.util import AverageMeter
 from utils.util import adjust_learning_rate, warmup_learning_rate, accuracy
 from utils.util import set_optimizer
 
-from networks.resnet_big import SupConResNet, LinearClassifier
+from networks.resnet_extended import SupConResNet, LinearClassifier
 from torch.utils.tensorboard import SummaryWriter
 
 
@@ -58,8 +57,6 @@ def parse_option():
     parser.add_argument('--dataset', type=str, default='cifar10',
                         choices=['cifar10', 'tiny-imagenet'], help='dataset')
     parser.add_argument('--size', type=int, default=32)
-    parser.add_argument('--mem_size', type=int, default=200) #buffer size
-    parser.add_argument('--n_bin', type=int, default=4) #buffer bins
 
     # other setting
     parser.add_argument('--cosine', action='store_true',
@@ -70,7 +67,7 @@ def parse_option():
     parser.add_argument('--ckpt', type=str, default='',
                         help='path to pre-trained model')
     parser.add_argument('--logpt', type=str, default='',
-                        help='path to logs')
+                        help='path to pre-trained model')
 
     opt = parser.parse_args()
 
@@ -118,11 +115,12 @@ def parse_option():
 
 
     opt.origin_ckpt = opt.ckpt
-    opt.ckpt = os.path.join(opt.ckpt, 'last_loss_buffer_{target_task}.pth'.format(target_task=opt.target_task))
+    opt.ckpt = os.path.join(opt.ckpt, 'last_random_{target_task}.pth'.format(target_task=opt.target_task))
+    opt.logpt = os.path.join(opt.logpt, 'replay_indices_random_{target_task}.npy'.format(target_task=opt.target_task))
     return opt
 
 
-def set_model(opt):
+def set_model(opt, cls_num_list):
     model = SupConResNet(name=opt.model)
     criterion = torch.nn.CrossEntropyLoss()
     classifier = LinearClassifier(name=opt.model, num_classes=opt.n_cls)
@@ -171,12 +169,9 @@ def train(train_loader, model, classifier, criterion, optimizer, epoch, opt):
 
         # compute loss
         with torch.no_grad():
-            features = model.encoder(images) # train classifier on features, the head of SupConResNet is only used for computing its loss
-        output = classifier(features.detach()) #detach to train only the classifier without computing gradient of ResNet's parameters
+            features = model.encoder(images)
+        output = classifier(features.detach())
         loss = criterion(output, labels)
-
-        print("predictions :",output.argmax(1))
-        print("labels :",labels)
 
         # update metric
         losses.update(loss.item(), bsz)
@@ -247,7 +242,6 @@ def validate(val_loader, model, classifier, criterion, opt):
                 correct_task += (output[mask, (tc // opt.cls_per_task) * opt.cls_per_task : ((tc // opt.cls_per_task)+1) * opt.cls_per_task].argmax(1) == (tc % opt.cls_per_task)).float().sum()
 
             for c in cls_list:
-                #print("class ", c)
                 mask = labels == c
                 corr[c] += correct_all[mask].float().sum().item()
                 cnt[c] += mask.float().sum().item()
@@ -269,22 +263,18 @@ def main():
     task_acc = 0
     opt = parse_option()
 
-    #initialize buffer
-    device = conf.get_device()
-    buffer = Buffer(opt.mem_size, device, n_tasks=opt.target_task,
-                            attributes=['examples', 'labels', 'logits', 'task_labels', 'loss_values'],
-                            n_bin=opt.n_bin)
-
     if opt.target_task is not None:
-        if opt.target_task > 0:
-            buffer.load(os.path.join(opt.logpt, f'loss_buffer_{opt.target_task}.pth'))
-        print('number of buffered samples : ', buffer.num_examples)
+        if opt.target_task == 0:
+            replay_indices = np.array([])
+        else:
+            replay_indices = np.load(opt.logpt)
+        print('number of samples to replay : ', len(replay_indices))
 
     # build data loader
-    train_loader, val_loader = set_loader(opt, buffer)
+    train_loader, val_loader, cls_num_list = set_loader(opt, replay_indices)
 
     # build model and criterion
-    model, classifier, criterion = set_model(opt)
+    model, classifier, criterion = set_model(opt, cls_num_list)
 
     # build optimizer
     optimizer = set_optimizer(opt, classifier)
@@ -328,7 +318,7 @@ def main():
         f.write(out)
 
     save_file = os.path.join(
-        opt.origin_ckpt, 'classifier_loss_buffer_{target_task}.pth'.format(target_task=opt.target_task))
+        opt.origin_ckpt, 'linear_{target_task}.pth'.format(target_task=opt.target_task))
     print('==> Saving...'+save_file)
     torch.save({
         'opt': opt,

@@ -16,7 +16,7 @@ from utils.util import TwoCropTransform, apply_transform, transform
 
 
 class Buffer(Dataset):
-    def __init__(self, buffer_size, device, n_tasks, attributes=['examples', 'labels', 'logits', 'task_labels'], n_bin=8):
+    def __init__(self, buffer_size, device, n_tasks, attributes=['examples', 'labels', 'logits', 'task_labels'], n_bin=8, writer=None):
         """
         Initializes the memory buffer.
 
@@ -41,12 +41,16 @@ class Buffer(Dataset):
         self.bins = np.zeros(self.num_bins)  # Initialize bins with zero counts
         self.min_loss = float('inf')
         self.max_loss = float('-inf')
-        self.budget = (self.buffer_size // self.num_bins) // self.task
+        self.budget = (self.buffer_size // self.num_bins) // self.task # 200//4//1 = 50 samples per bin
         self.num_examples = 0
+
+        #self.writer = writer #tensorboard writer
+        print(f"buffer CUDA device: {torch.cuda.current_device()}")
 
     def reset_budget(self):
         self.task += 1
         self.budget = (self.buffer_size // self.num_bins) // self.task
+        print("buffer bins budget : ", self.budget)
 
     def reset_bins(self):
         self.bins = np.zeros(self.num_bins)
@@ -70,6 +74,7 @@ class Buffer(Dataset):
             return 0  # All losses are the same, only one bin needed
         bin_width = bin_range / self.num_bins
         bin_index = int((loss_value - self.min_loss) / bin_width)
+        #print(f'loss {loss_value}, bin {bin_index}, width {bin_width}')
         return min(bin_index, self.num_bins - 1)  # To handle the max loss
 
     def reservoir_bin_loss(self, loss_value: float) -> int:
@@ -80,13 +85,14 @@ class Buffer(Dataset):
         bin_index = self.get_bin_index(loss_value)
 
         if self.bins[bin_index] < self.budget:
+            print(f'bin {bin_index}')
             if self.num_examples < self.buffer_size:
                 self.bins[bin_index] += 1
-                return self.num_examples
+                return self.num_examples #buffer new data next to previously stored data if buffer is not full
             else:
-                rand = np.random.randint(0, self.buffer_size)
+                rand = np.random.randint(0, self.buffer_size) 
                 self.bins[bin_index] += 1
-                return rand
+                return rand #buffer new data at a random index if buffer memory is full
         else:
             return -1
 
@@ -127,15 +133,17 @@ class Buffer(Dataset):
                                                          *attr.shape[1:]), dtype=typ, device=self.device))
 
     def add_data(self, examples, labels=None, clusters_labels=None, logits=None, clusters_logits=None, task_labels=None, loss_values=None):
+        print(f"buffer CUDA device: {torch.cuda.current_device()}")
         if not hasattr(self, 'examples'):
             self.init_tensors(examples, labels, logits, task_labels, clusters_labels=clusters_labels, clusters_logits=clusters_logits, loss_values=loss_values)
         rix = []
         for i in range(examples.shape[0]):
             index = self.reservoir_bin_loss(loss_values[i]) #choosing which samples to store
-            if index>-1 :
-                print('adding data to buffer at index ', index)
             self.num_seen_examples += 1
             if index >= 0:
+                print(f'adding data to buffer at index {index}')
+                #self.writer.add_scalar("buffered samples loss / buffer index", loss_values[i], index)
+                #self.writer.add_histogram("buffer bins", values=self.bins, global_step=self.num_seen_examples)
                 self.num_examples += 1
                 if self.examples.device != self.device:
                     self.examples.to(self.device)

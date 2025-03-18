@@ -258,7 +258,9 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=opt.batch_size, shuffle=(train_sampler is None),
         num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler,
-        persistent_workers=True)
+        persistent_workers=True) #faster data loading across epochs, and avoids creating multiple CUDA contexts
+        #persistent_workers=False)
+
 
     return train_loader, subset_indices
 
@@ -269,8 +271,8 @@ def set_model(opt):
     criterion = SupConLoss(temperature=opt.temp)
 
     if torch.cuda.is_available():
-        if torch.cuda.device_count() > 1:
-            model.encoder = torch.nn.DataParallel(model.encoder)
+        #if torch.cuda.device_count() > 1:
+        #    model.encoder = torch.nn.DataParallel(model.encoder)
         model = model.cuda()
         criterion = criterion.cuda()
         cudnn.benchmark = True
@@ -306,6 +308,7 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
 
         images = torch.cat([images[0], images[1]], dim=0) # two augmentations of the same image : images[0] has the first augmentations, images[1] has the second augmentations
         if torch.cuda.is_available():
+            print(f"data CUDA device: {torch.cuda.current_device()}")
             images = images.cuda(non_blocking=True) # Moves the tensor to GPU memory for efficient computation, assuming the program is running on a GPU.
             labels = labels.cuda(non_blocking=True) # non_blocking=True allows asynchronous data transfers for better performance.
         #print("images tensor : ",images.shape) #images tensor :  torch.Size([544, 3, 32, 32]) last batch
@@ -355,13 +358,13 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
         device = conf.get_device()
         #i1, i2 = torch.split(features, [bsz, bsz], dim=0) #let's not do this to not arbitrarily favor one augmentation over another
         #let's duplicate labels instead
-        #labels2 = labels.repeat(2)
         task = (torch.ones(labels.shape[0]) * opt.target_task).to(device, dtype=torch.long)
+        #print(f"images {images.shape} \t labels2 {labels.shape} \t task_labels {task.shape} \t logits {features.shape} \t loss_values {loss_values.shape}")
         # add data to buffer
         buffer.add_data(examples=images,
                             #examples=i1,
-                            labels=labels,
-                            task_labels=task,
+                            labels=labels.repeat(2),
+                            task_labels=task.repeat(2),
                             logits=features,
                             loss_values=loss_values)
 
@@ -409,6 +412,12 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
 def main():
     opt = parse_option()
 
+    ########################## TENSORBOARD #############################
+    logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
+    #global tensorboard_writer
+    tensorboard_writer = SummaryWriter('{}/summary'.format(opt.tb_folder))
+    ####################################################################
+
     target_task = opt.target_task
 
     # build model and criterion
@@ -417,10 +426,16 @@ def main():
     model2.eval()
 
     #initialize buffer
-    device = conf.get_device()
+    #device = conf.get_device()
+    if torch.cuda.is_available():
+        device = 'cuda'
+        print(f"main program CUDA device: {torch.cuda.current_device()}")
+    else:
+        device = 'cpu'
     buffer = Buffer(opt.mem_size, device, n_tasks=opt.end_task,
                              attributes=['examples', 'labels', 'logits', 'task_labels', 'loss_values'],
-                             n_bin=opt.n_bin)
+                             n_bin=opt.n_bin,
+                             writer=tensorboard_writer)
 
     # build optimizer
     optimizer = set_optimizer(opt, model)
@@ -432,12 +447,6 @@ def main():
             os.path.join(opt.log_folder, 'loss_buffer_{target_task}.pth'.format(target_task=target_task))
         )
         print('number of buffered samples : ', buffer.num_examples)
-
-    ########################## TENSORBOARD #############################
-    logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
-    #global tensorboard_writer
-    tensorboard_writer = SummaryWriter('{}/summary'.format(opt.tb_folder))
-    ####################################################################
 
     original_epochs = opt.epochs
 

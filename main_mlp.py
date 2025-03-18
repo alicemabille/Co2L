@@ -362,8 +362,8 @@ def set_model(opt):
     criterion = SupConLoss(temperature=opt.temp)
 
     if torch.cuda.is_available():
-        if torch.cuda.device_count() > 1:
-            model.encoder = torch.nn.DataParallel(model.encoder)
+        #if torch.cuda.device_count() > 1:
+        #    model.encoder = torch.nn.DataParallel(model.encoder)
         model = model.cuda()
         criterion = criterion.cuda()
         cudnn.benchmark = True
@@ -437,13 +437,13 @@ def train(train_loader:torch.utils.data.DataLoader, model:SupConResNet, model2:S
         #print("SupConResNet head output features : ", features)
         f1, f2 = torch.split(features, [bsz, bsz], dim=0)
         features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
-        loss, logprob, mask = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
-        print("AsymSupCon loss : ",loss)
+        loss, logprob = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
+        #print("AsymSupCon loss : ",loss)
 
         # IRD (past)
         if opt.target_task > 0:
             with torch.no_grad():
-                features2_prev_task = model2(images_cuda)
+                _, features2_prev_task = model2(images_cuda, return_feat=True)
 
                 features2_sim = torch.div(torch.matmul(features2_prev_task, features2_prev_task.T), opt.past_temp)
                 logits_max2, _ = torch.max(features2_sim*logits_mask, dim=1, keepdim=True)
@@ -582,6 +582,10 @@ def main():
         save_file = os.path.join(
             opt.save_folder, 'last_{policy}_{target_task}.pth'.format(policy=opt.replay_policy ,target_task=target_task))
         save_model(model, optimizer, opt, opt.epochs, save_file)
+
+        # reinit mlp extension
+        if hasattr(model.predictor, 'reset_parameters'):
+            model.predictor.reset_parameters()
 
 if __name__ == '__main__':
     main()
