@@ -16,7 +16,6 @@ import math
 import random
 import numpy as np
 
-import tensorboard_logger as tb_logger
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -105,6 +104,8 @@ def parse_option():
                         help='warm-up for large batch training')
     parser.add_argument('--trial', type=str, default='0',
                         help='id for recording multiple runs')
+    parser.add_argument('--tensorboard', action='store_true',
+                    help='use tensorboard for logging and visualization')
 
     opt = parser.parse_args()
 
@@ -518,9 +519,14 @@ def main():
             ).tolist()
         print(len(replay_indices))
 
-    # tensorboard
-    print("setting tensorboard...")
-    logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
+    ########################## TENSORBOARD #############################
+    if opt.tensorboard:
+        import tensorboard_logger as tb_logger
+        from torch.utils.tensorboard import SummaryWriter
+        logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
+        #global tensorboard_writer
+        tensorboard_writer = SummaryWriter('{}/summary'.format(opt.tb_folder))
+    ####################################################################
 
     original_epochs = opt.epochs
 
@@ -574,9 +580,10 @@ def main():
             time2 = time.time()
             print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
-            # tensorboard logger
-            logger.log_value('loss_{target_task}'.format(target_task=target_task), loss, epoch)
-            logger.log_value('learning_rate_{target_task}'.format(target_task=target_task), optimizer.param_groups[0]['lr'], epoch)
+            if opt.tensorboard:
+                # tensorboard logger
+                logger.log_value('loss_{target_task}'.format(target_task=target_task), loss, epoch)
+                logger.log_value('learning_rate_{target_task}'.format(target_task=target_task), optimizer.param_groups[0]['lr'], epoch)
 
         # save the last model
         save_file = os.path.join(

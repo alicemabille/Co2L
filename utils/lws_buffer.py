@@ -16,7 +16,7 @@ from utils.util import TwoCropTransform, apply_transform, transform
 
 
 class Buffer(Dataset):
-    def __init__(self, buffer_size, device, n_tasks, attributes=['examples', 'labels', 'logits', 'task_labels'], n_bin=8, writer=None):
+    def __init__(self, buffer_size, device, n_tasks, attributes=['examples', 'labels', 'logits', 'task_labels'], n_bin=8, cuda_debug_mode=False, writer=None):
         """
         Initializes the memory buffer.
 
@@ -34,7 +34,6 @@ class Buffer(Dataset):
         self.task = 1
         self.task_number = n_tasks
         self.attributes = attributes
-        self.delta = torch.zeros(buffer_size, device=device)
 
         self.balanced_class_perm = None
         self.num_bins = n_bin
@@ -44,8 +43,11 @@ class Buffer(Dataset):
         self.budget = (self.buffer_size // self.num_bins) // self.task # 200//4//1 = 50 samples per bin
         self.num_examples = 0
 
+        self.cuda_debug_mode = cuda_debug_mode
         #self.writer = writer #tensorboard writer
-        print(f"buffer CUDA device: {torch.cuda.current_device()}")
+        
+        if torch.cuda.is_available():
+            print(f"buffer CUDA device: {torch.cuda.current_device()}")
 
     def reset_budget(self):
         self.task += 1
@@ -133,7 +135,8 @@ class Buffer(Dataset):
                                                          *attr.shape[1:]), dtype=typ, device=self.device))
 
     def add_data(self, examples, labels=None, clusters_labels=None, logits=None, clusters_logits=None, task_labels=None, loss_values=None):
-        print(f"buffer CUDA device: {torch.cuda.current_device()}")
+        if torch.cuda.is_available() and self.cuda_debug_mode:
+            print(f"buffer CUDA device: {torch.cuda.current_device()}")
         if not hasattr(self, 'examples'):
             self.init_tensors(examples, labels, logits, task_labels, clusters_labels=clusters_labels, clusters_logits=clusters_logits, loss_values=loss_values)
         rix = []
@@ -258,12 +261,10 @@ class Buffer(Dataset):
         """
         state = {
             'buffer_size': self.buffer_size,
-            'device': self.device,
             'num_seen_examples': self.num_seen_examples,
             'task': self.task,
             'task_number': self.task_number,
             'attributes': self.attributes,
-            'delta': self.delta,
             'balanced_class_perm': self.balanced_class_perm,
             'num_bins': self.num_bins,
             'bins': self.bins,
@@ -287,7 +288,8 @@ class Buffer(Dataset):
         Args:
             file_path: The path to the file from which the buffer's state will be loaded.
         """
-        state = torch.load(file_path, map_location=self.device)
+        print('buffer device : ',self.device)
+        state = torch.load(file_path, map_location=self.device, weights_only=False)
 
         # Restore the buffer's attributes
         for key, value in state.items():
@@ -418,3 +420,21 @@ def set_loader(opt, buffer:Buffer=None):
         num_workers=8, pin_memory=True)
 
     return train_loader, val_loader
+
+
+class PermuteDims(object):
+    """
+    changes data from (H, W, C) to (C, H, W) to match dataset
+    """
+    def __init__(self):
+        super(PermuteDims, self).__init__()
+    
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        return x.permute(2, 1, 0).float() / 255.0
+    
+def collate_fn(batch):
+    """
+    Collate function for the dataloader.
+    Default collate_fn automatically converts NumPy arrays and Python numerical values into PyTorch Tensors.
+    """
+    return tuple(zip(*batch))

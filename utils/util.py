@@ -194,3 +194,6 @@ def load_model(model, optimizer, save_file):
     del loaded
 
     return model, optimizer
+
+def worker_init_cuda_debug(worker_id):
+    print(f"Worker {worker_id} is using CUDA device: {torch.cuda.current_device()}")

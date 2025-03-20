@@ -6,6 +6,9 @@ https://github.com/HobbitLong/SupContrast/blob/master/main_supcon.py
 from __future__ import print_function
 
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0" #ensure everything is on same GPU to avoid cuda initialization errors
+import warnings
+warnings.filterwarnings("ignore")
 import copy
 import sys
 import argparse
@@ -16,22 +19,19 @@ import random
 import numpy as np
 import torchvision
 
-import tensorboard_logger as tb_logger
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 from torchvision import datasets
 from torch.utils.data import Subset, Dataset
-from torch.utils.tensorboard import SummaryWriter
 
 from datasets import TinyImagenet
 from utils.util import TwoCropTransform, AverageMeter, transform
-from utils.util import adjust_learning_rate, warmup_learning_rate
-from utils.util import set_optimizer, save_model, load_model
+from utils.util import *
 from networks.resnet_big import SupConResNet
 from losses_negative_only import SupConLoss
-from utils.lws_buffer import Buffer
+from utils.lws_buffer import *
 import utils.conf as conf
 
 def parse_option():
@@ -103,6 +103,10 @@ def parse_option():
                         help='warm-up for large batch training')
     parser.add_argument('--trial', type=str, default='0',
                         help='id for recording multiple runs')
+    parser.add_argument('--cuda_debug', action='store_true',
+                        help='activate CUDA device prints to terminal')
+    parser.add_argument('--tensorboard', action='store_true',
+                        help='use tensorboard for logging and visualization')
 
     opt = parser.parse_args()
 
@@ -208,13 +212,26 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
         # Add buffer data if available
         if buffer is not None and opt.target_task > 0:
            # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
-            #buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor))) #don't do this : buffered samples are already augmented !
-            buffer_data = buffer.get_data(opt.mem_size)
-            print('shape of buffer data : ', buffer_data[0].shape)
-            print('shape of buffer labels : ', buffer_data[1].shape)
-            print('number of buffered samples : ', buffer.num_examples)
-            buffer_dataset = torch.utils.data.TensorDataset(buffer_data[0], buffer_data[1]) 
+           # change buffer data from (N, H, W, C) to (N, C, H, W) to match dataset
+            buffer_data = buffer.get_data(opt.mem_size, transform=PermuteDims())
+            #print('number of buffered samples : ', buffer.num_examples)
+            data = buffer_data[0]
+            targets = buffer_data[1]
+            #print('shape of buffer data : ', buffer_images.shape)
+            #print('shape of buffer labels : ', buffer_labels.shape)
+            buffer_dataset = torch.utils.data.TensorDataset(data, targets)
+            
+            #print('Train dataset image shapes:', [img.shape for img in _train_dataset.data[:10]], 'types :', [type(img) for img in _train_dataset.data[:10]])
+            print('max dataset image size : ', max([img.shape for img in _train_dataset.data]))
+            print('min dataset image size : ', min([img.shape for img in _train_dataset.data]))
+            print('Buffer dataset images shape:', buffer_dataset.tensors[0].shape)
+            print('Buffer dataset targets shape:', buffer_dataset.tensors[1].shape)
+            print('Train dataset first targets:', _train_dataset.targets[:10])
             train_dataset = torch.utils.data.ConcatDataset([Subset(_train_dataset, subset_indices), buffer_dataset])
+            print(train_dataset)
+            #print('Concatenated dataset image shapes:', train_dataset.tensors[0].shape)
+            #print('Concatenated dataset targets:', train_dataset.tensors[1].shape)
+
         else:
             train_dataset = Subset(_train_dataset, subset_indices)
 
@@ -235,11 +252,16 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
         if buffer is not None and opt.target_task > 0:
            # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
             #buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor))) #don't do this : buffered samples are already augmented !
-            buffer_data = buffer.get_data(opt.mem_size)
+            buffer_data = buffer.get_data(opt.mem_size, transform=PermuteDims)
             print('shape of buffer data : ', buffer_data[0].shape)
             print('shape of buffer labels : ', buffer_data[1].shape)
             print('number of buffered samples : ', buffer.num_examples)
-            buffer_dataset = torch.utils.data.TensorDataset(buffer_data[0], buffer_data[1]) 
+             # change buffer data from (N, H, W, C) to (N, C, H, W) to match dataset
+            buffer_images = buffer_data[0]
+            buffer_dataset = torch.utils.data.TensorDataset(buffer_images, buffer_data[1]) 
+            
+            print('Train dataset image shapes:', [img.shape for img in _train_dataset.data[:10]])
+            print('Buffer dataset image shapes:', [img.shape for img in buffer_images[:10]])
             train_dataset = torch.utils.data.ConcatDataset([Subset(_train_dataset, subset_indices), buffer_dataset])
         else:
             train_dataset = Subset(_train_dataset, subset_indices)
@@ -258,8 +280,9 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=opt.batch_size, shuffle=(train_sampler is None),
         num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler,
-        persistent_workers=True) #faster data loading across epochs, and avoids creating multiple CUDA contexts
-        #persistent_workers=False)
+        persistent_workers=True, #faster data loading across epochs, and avoids creating multiple CUDA contexts
+        worker_init_fn=worker_init_cuda_debug if opt.cuda_debug else None,
+        collate_fn=collate_fn)
 
 
     return train_loader, subset_indices
@@ -308,7 +331,8 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
 
         images = torch.cat([images[0], images[1]], dim=0) # two augmentations of the same image : images[0] has the first augmentations, images[1] has the second augmentations
         if torch.cuda.is_available():
-            print(f"data CUDA device: {torch.cuda.current_device()}")
+            if opt.cuda_debug :
+                print(f"Batch {idx} is using CUDA device: {torch.cuda.current_device()}")
             images = images.cuda(non_blocking=True) # Moves the tensor to GPU memory for efficient computation, assuming the program is running on a GPU.
             labels = labels.cuda(non_blocking=True) # non_blocking=True allows asynchronous data transfers for better performance.
         #print("images tensor : ",images.shape) #images tensor :  torch.Size([544, 3, 32, 32]) last batch
@@ -413,9 +437,12 @@ def main():
     opt = parse_option()
 
     ########################## TENSORBOARD #############################
-    logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
-    #global tensorboard_writer
-    tensorboard_writer = SummaryWriter('{}/summary'.format(opt.tb_folder))
+    if opt.tensorboard:
+        import tensorboard_logger as tb_logger
+        from torch.utils.tensorboard import SummaryWriter
+        logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
+        #global tensorboard_writer
+        tensorboard_writer = SummaryWriter('{}/summary'.format(opt.tb_folder))
     ####################################################################
 
     target_task = opt.target_task
@@ -429,13 +456,15 @@ def main():
     #device = conf.get_device()
     if torch.cuda.is_available():
         device = 'cuda'
-        print(f"main program CUDA device: {torch.cuda.current_device()}")
+        if opt.cuda_debug :
+            print(f"main program CUDA device: {torch.cuda.current_device()}")
     else:
         device = 'cpu'
     buffer = Buffer(opt.mem_size, device, n_tasks=opt.end_task,
                              attributes=['examples', 'labels', 'logits', 'task_labels', 'loss_values'],
                              n_bin=opt.n_bin,
-                             writer=tensorboard_writer)
+                             cuda_debug_mode=opt.cuda_debug,
+                             writer=tensorboard_writer if opt.tensorboard else None)
 
     # build optimizer
     optimizer = set_optimizer(opt, model)
@@ -482,9 +511,10 @@ def main():
             time2 = time.time()
             print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
-            # tensorboard logger
-            logger.log_value('loss_{target_task}'.format(target_task=target_task), loss, epoch)
-            logger.log_value('learning_rate_{target_task}'.format(target_task=target_task), optimizer.param_groups[0]['lr'], epoch)
+            if opt.tensorboard:
+                # tensorboard logger
+                logger.log_value('loss_{target_task}'.format(target_task=target_task), loss, epoch)
+                logger.log_value('learning_rate_{target_task}'.format(target_task=target_task), optimizer.param_groups[0]['lr'], epoch)
 
 
         ####### END OF TASK ##########
@@ -499,8 +529,11 @@ def main():
         #if opt.reset_bins :
         #reset buffer bins
         buffer.reset_bins()
-    tensorboard_writer.close()
+
+    if opt.tensorboard:
+        tensorboard_writer.close()
 
 
 if __name__ == '__main__':
+    torch.multiprocessing.set_start_method('spawn', force=True)
     main()

@@ -10,23 +10,31 @@ import numpy as np
 parser = argparse.ArgumentParser('arguments')
 
 parser.add_argument('--task', type=int, default=0)
+parser.add_argument('--data_folder', type=str, default='./data')
 
 opt = parser.parse_args()
 
-# Assuming the Buffer class is already defined and the `load` method is implemented
-buffer = Buffer(buffer_size=200, device='cuda', n_tasks=4)  # Initialize with dummy parameters
-print(f'loading loss_buffer_{opt.task}.pth')
-buffer.load(f'loss_buffer_{opt.task}.pth')  # Load the buffer from the saved file
+if torch.cuda.is_available():
+        device = 'cuda'
+        print(f"main program CUDA device: {torch.cuda.current_device()}")
+else:
+    device = 'cpu'
+buffer = Buffer(buffer_size=200, device=device, n_tasks=4)  # Initialize with dummy parameters
+print(f'loading {opt.data_folder}loss_buffer_{opt.task}.pth')
+buffer.load(f'{opt.data_folder}loss_buffer_{opt.task}.pth')  # Load the buffer from the saved file
 
 # Get a batch of images from the buffer
 buffer_data = buffer.get_data(size=200)  # Get 10 images and their labels
 images = buffer_data[0].cpu()  # Move images to CPU for visualization
+print('buffer images shape : ',images.shape)
 labels = buffer_data[1].cpu()
+print('buffer labels shape : ',labels.shape)
 loss_values = buffer_data[4].cpu()
-print(loss_values)
+print('buffer loss values : ',loss_values)
 
 # Create a TensorBoard writer
-writer = SummaryWriter(f'runs/buffer_visualization_{opt.task}')
+writer = SummaryWriter(f'{opt.data_folder}/buffer_visualization_{opt.task}')
+print('writing to', f'{opt.data_folder}/buffer_visualization_{opt.task}')
 
 # Function to interpolate between red and green based on loss values
 def loss_to_color(loss, max_loss):
