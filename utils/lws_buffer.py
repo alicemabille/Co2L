@@ -189,6 +189,9 @@ class Buffer(Dataset):
         return self.task_labels.cpu().numpy()
 
     def get_data(self, size: int, transform: transforms = None, return_index=False, to_device=None) -> Tuple:
+        """
+        Get data from the buffer at random indices.
+        """
         m_t = min(self.num_examples, self.examples.shape[0])
         if size > m_t:
             size = m_t
