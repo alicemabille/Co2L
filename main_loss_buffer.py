@@ -6,9 +6,6 @@ https://github.com/HobbitLong/SupContrast/blob/master/main_supcon.py
 from __future__ import print_function
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0" #ensure everything is on same GPU to avoid cuda initialization errors
-import warnings
-warnings.filterwarnings("ignore")
 import copy
 import sys
 import argparse
@@ -17,22 +14,22 @@ import time
 import math
 import random
 import numpy as np
-import torchvision
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
-from torchvision import datasets
+from torchvision import transforms, datasets
 from torch.utils.data import Subset, Dataset
 
 from datasets import TinyImagenet
-from utils.util import TwoCropTransform, AverageMeter, transform
-from utils.util import *
+from utils.lws_buffer import Buffer
+from utils.util import TwoCropTransform, AverageMeter
+from utils.util import adjust_learning_rate, warmup_learning_rate
+from utils.util import set_optimizer, save_model, load_model
 from networks.resnet_big import SupConResNet
 from losses_negative_only import SupConLoss
-from utils.lws_buffer import *
-import utils.conf as conf
+
 
 def parse_option():
     parser = argparse.ArgumentParser('argument for training')
@@ -43,9 +40,9 @@ def parse_option():
 
     parser.add_argument('--end_task', type=int, default=None)
 
-    parser.add_argument('--mem_size', type=int, default=200) #buffer size
-    parser.add_argument('--n_bin', type=int, default=4) #buffer bins
-    #parser.add_argument('--reset_bins', action='store_true') #reset buffer's loss bins budget at the end of every task ?
+    parser.add_argument('--replay_policy', type=str, choices=['random'], default='random')
+
+    parser.add_argument('--mem_size', type=int, default=200)
 
     parser.add_argument('--cls_per_task', type=int, default=2)
 
@@ -99,14 +96,14 @@ def parse_option():
     # other setting
     parser.add_argument('--cosine', action='store_true',
                         help='using cosine annealing')
+    parser.add_argument('--syncBN', action='store_true',
+                        help='using synchronized batch normalization')
     parser.add_argument('--warm', action='store_true',
                         help='warm-up for large batch training')
     parser.add_argument('--trial', type=str, default='0',
                         help='id for recording multiple runs')
-    parser.add_argument('--cuda_debug', action='store_true',
-                        help='activate CUDA device prints to terminal')
     parser.add_argument('--tensorboard', action='store_true',
-                        help='use tensorboard for logging and visualization')
+                help='use tensorboard for logging and visualization')
 
     opt = parser.parse_args()
 
@@ -124,13 +121,6 @@ def parse_option():
     else:
         pass
 
-    if opt.end_task is not None:
-        if opt.resume_target_task is not None:
-            assert opt.end_task > opt.resume_target_task
-            opt.end_task = min(opt.end_task+1, opt.n_cls // opt.cls_per_task)
-    else:
-        opt.end_task = opt.n_cls // opt.cls_per_task
-
 
     # check if dataset is path that passed required arguments
     if opt.dataset == 'path':
@@ -141,10 +131,13 @@ def parse_option():
     # set the path according to the environment
     if opt.data_folder is None:
         opt.data_folder = '~/data/'
+    """opt.model_path = './save_{}_{}/{}_models'.format(opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.tb_path = './save_{}_{}/{}_tensorboard'.format(opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.log_path = './save_{}_{}/logs'.format(opt.replay_policy, opt.mem_size, opt.dataset)"""
 
-    opt.model_path = '{}/save_loss_buffer_{}/{}_models'.format(opt.data_folder, opt.mem_size, opt.dataset)
-    opt.tb_path = '{}/save_loss_buffer_{}/{}_tensorboard'.format(opt.data_folder, opt.mem_size, opt.dataset)
-    opt.log_path = '{}/save_loss_buffer_{}/logs'.format(opt.data_folder, opt.mem_size, opt.dataset)
+    opt.model_path = '{}/save_{}_{}/{}_models'.format(opt.data_folder , opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.tb_path = '{}/save_{}_{}/{}_tensorboard'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
+    opt.log_path = '{}/save_{}_{}/logs'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
 
     iterations = opt.lr_decay_epochs.split(',')
     opt.lr_decay_epochs = list([])
@@ -193,51 +186,51 @@ def parse_option():
     return opt
 
 
-def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
+def set_loader(opt, replay_indices):
     # construct data loader
+    if opt.dataset == 'cifar10':
+        mean = (0.4914, 0.4822, 0.4465)
+        std = (0.2023, 0.1994, 0.2010)
+    elif opt.dataset == 'tiny-imagenet':
+        mean = (0.4802, 0.4480, 0.3975)
+        std = (0.2770, 0.2691, 0.2821)
+    elif opt.dataset == 'path':
+        mean = eval(opt.mean)
+        std = eval(opt.mean)
+    else:
+        raise ValueError('dataset not supported: {}'.format(opt.dataset))
+
+
+    normalize = transforms.Normalize(mean=mean, std=std)
+    train_transform = transforms.Compose([
+        transforms.Resize(size=(opt.size, opt.size)),
+        transforms.RandomResizedCrop(size=opt.size, scale=(0.1 if opt.dataset=='tiny-imagenet' else 0.2, 1.)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomApply([
+            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
+        ], p=0.8),
+        transforms.RandomGrayscale(p=0.2),
+        transforms.RandomApply([transforms.GaussianBlur(kernel_size=opt.size//20*2+1, sigma=(0.1, 2.0))], p=0.5 if opt.size>32 else 0.0),
+        transforms.ToTensor(),
+        normalize,
+    ])
+
+
     target_classes = list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task))
     print(target_classes)
-
-    train_transform = transform(opt)
 
     if opt.dataset == 'cifar10':
         subset_indices = []
         _train_dataset = datasets.CIFAR10(root='{}/datasets'.format(opt.data_folder),
-                                         transform=TwoCropTransform(train_transform), #Create two crops of the same image
+                                         transform=TwoCropTransform(train_transform),
                                          download=True)
         for tc in target_classes:
             target_class_indices = np.where(np.array(_train_dataset.targets) == tc)[0]
             subset_indices += np.where(np.array(_train_dataset.targets) == tc)[0].tolist()
 
-        # Add buffer data if available
-        if buffer is not None and opt.target_task > 0:
-           # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
-           # change buffer data from (N, H, W, C) to (N, C, H, W) to match dataset
-            buffer_data = buffer.get_data(opt.mem_size, transform=PermuteDims())
-            #print('number of buffered samples : ', buffer.num_examples)
-            data = buffer_data[0].detach().clone()
-            targets = buffer_data[1].detach().clone()
-            # Assert that data and targets are tensors
-            assert isinstance(data, torch.Tensor), "Data is not a tensor"
-            assert isinstance(targets, torch.Tensor), "Targets are not tensors"
-            #print('shape of buffer data : ', buffer_images.shape)
-            #print('shape of buffer labels : ', buffer_labels.shape)
-            buffer_dataset = torch.utils.data.TensorDataset(data, targets)
-            
-            #print('Train dataset image shapes:', [img.shape for img in _train_dataset.data[:10]], 'types :', [type(img) for img in _train_dataset.data[:10]])
-            print('max dataset image size : ', max([img.shape for img in _train_dataset.data]))
-            print('min dataset image size : ', min([img.shape for img in _train_dataset.data]))
-            print('Buffer dataset images shape:', buffer_dataset.tensors[0].shape)
-            print('Buffer dataset targets shape:', buffer_dataset.tensors[1].shape)
-            print('Train dataset first targets:', _train_dataset.targets[:10])
-            train_dataset = torch.utils.data.ConcatDataset([Subset(_train_dataset, subset_indices), buffer_dataset])
-            print(train_dataset)
-            #print('Concatenated dataset image shapes:', train_dataset.tensors[0].shape)
-            #print('Concatenated dataset targets:', train_dataset.tensors[1].shape)
+        subset_indices += replay_indices
 
-        else:
-            train_dataset = Subset(_train_dataset, subset_indices)
-
+        train_dataset =  Subset(_train_dataset, subset_indices)
         print('Dataset size: {}'.format(len(subset_indices)))
         uk, uc = np.unique(np.array(_train_dataset.targets)[subset_indices], return_counts=True)
         print(uc[np.argsort(uk)])
@@ -251,24 +244,9 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
             target_class_indices = np.where(_train_dataset.targets == tc)[0]
             subset_indices += np.where(_train_dataset.targets == tc)[0].tolist()
 
-        # Add buffer data if available
-        if buffer is not None and opt.target_task > 0:
-           # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
-            #buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor))) #don't do this : buffered samples are already augmented !
-            buffer_data = buffer.get_data(opt.mem_size, transform=PermuteDims)
-            print('shape of buffer data : ', buffer_data[0].shape)
-            print('shape of buffer labels : ', buffer_data[1].shape)
-            print('number of buffered samples : ', buffer.num_examples)
-             # change buffer data from (N, H, W, C) to (N, C, H, W) to match dataset
-            buffer_images = buffer_data[0]
-            buffer_dataset = torch.utils.data.TensorDataset(buffer_images, buffer_data[1]) 
-            
-            print('Train dataset image shapes:', [img.shape for img in _train_dataset.data[:10]])
-            print('Buffer dataset image shapes:', [img.shape for img in buffer_images[:10]])
-            train_dataset = torch.utils.data.ConcatDataset([Subset(_train_dataset, subset_indices), buffer_dataset])
-        else:
-            train_dataset = Subset(_train_dataset, subset_indices)
+        subset_indices += replay_indices
 
+        train_dataset =  Subset(_train_dataset, subset_indices)
         print('Dataset size: {}'.format(len(subset_indices)))
         uk, uc = np.unique(np.array(_train_dataset.targets)[subset_indices], return_counts=True)
         print(uc[np.argsort(uk)])
@@ -282,11 +260,7 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
     train_sampler = None
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=opt.batch_size, shuffle=(train_sampler is None),
-        num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler,
-        persistent_workers=True, #faster data loading across epochs, and avoids creating multiple CUDA contexts
-        worker_init_fn=worker_init_cuda_debug if opt.cuda_debug else None,
-        collate_fn=collate_fn)
-
+        num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler)
 
     return train_loader, subset_indices
 
@@ -296,9 +270,13 @@ def set_model(opt):
     model = SupConResNet(name=opt.model)
     criterion = SupConLoss(temperature=opt.temp)
 
+    # enable synchronized Batch Normalization
+    '''if opt.syncBN:
+        model = apex.parallel.convert_syncbn_model(model)'''
+
     if torch.cuda.is_available():
-        #if torch.cuda.device_count() > 1:
-        #    model.encoder = torch.nn.DataParallel(model.encoder)
+        if torch.cuda.device_count() > 1:
+            model.encoder = torch.nn.DataParallel(model.encoder)
         model = model.cuda()
         criterion = criterion.cuda()
         cudnn.benchmark = True
@@ -307,17 +285,7 @@ def set_model(opt):
 
 
 def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.Module, criterion:SupConLoss, optimizer:torch.optim.SGD, epoch:int, opt:argparse.Namespace, buffer:Buffer):
-    """
-    one epoch training
-
-    train_loader : union of current task samples and buffered samples, without any oversampling.
-    model : the new model to train (this function calls .train() on it)
-    model2 : frozen previous model, in test mode (previously called .eval() on it)
-    criterion : 
-    optimizer : stochastic gradient descent for the model's parameters, with specified learning rate, momentum and weight decay
-    epoch : specifies which epoch this is, to calculate a warm-up learning rate if the epoch is in warm-up phase
-    buffer :
-    """
+    """one epoch training"""
     model.train()
 
     batch_time = AverageMeter()
@@ -326,35 +294,27 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
     distill = AverageMeter()
 
     end = time.time()
-
-    #iterating over batches
     for idx, (images, labels) in enumerate(train_loader):
-
         data_time.update(time.time() - end)
-        im0 = images[0]
-        im1 = images[1]
 
-        print("####### DEBUG ###### length of im0 : ", len(im0),"\n")
-        print("####### DEBUG ###### length of im1 : ", len(im1),"\n")
+        # Compute original dataset indices
+        if isinstance(train_loader.dataset, Subset):
+            original_indices = [train_loader.dataset.indices[i] for i in range(idx * opt.batch_size, min((idx + 1) * opt.batch_size, len(train_loader.dataset)))]
+        else:
+            original_indices = list(range(idx * opt.batch_size, min((idx + 1) * opt.batch_size, len(train_loader.dataset))))
 
-        print("####### DEBUG ###### labels type : ", type(labels))
-        print("####### DEBUG ###### length of labels : ", len(labels),"\n")
-        print("####### DEBUG ###### labels 0 type : ", type(labels[0]),"\n")
+        # Log or use the original indices as needed
+        print(f"Batch {idx + 1}: Original dataset indices: {original_indices}")
 
-        images = torch.cat([images[0], images[1]], dim=0) # two augmentations of the same image : images[0] has the first augmentations, images[1] has the second augmentations
+        images = torch.cat([images[0], images[1]], dim=0)
         if torch.cuda.is_available():
-            if opt.cuda_debug :
-                print(f"Batch {idx} is using CUDA device: {torch.cuda.current_device()}")
-            images = images.cuda(non_blocking=True) # Moves the tensor to GPU memory for efficient computation, assuming the program is running on a GPU.
-            labels = labels.cuda(non_blocking=True) # non_blocking=True allows asynchronous data transfers for better performance.
-        #print("images tensor : ",images.shape) #images tensor :  torch.Size([544, 3, 32, 32]) last batch
-        #print("labels tensor : ",labels.shape) #labels tensor :  torch.Size([272])
+            images = images.cuda(non_blocking=True)
+            labels = labels.cuda(non_blocking=True)
         bsz = labels.shape[0]
 
         with torch.no_grad():
             prev_task_mask = labels < opt.target_task * opt.cls_per_task
             prev_task_mask = prev_task_mask.repeat(2)
-
 
         # warm-up learning rate
         warmup_learning_rate(opt, epoch, idx, len(train_loader), optimizer)
@@ -368,41 +328,20 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
 
             features1_sim = torch.div(torch.matmul(features1_prev_task, features1_prev_task.T), opt.current_temp)
             logits_mask = torch.scatter(
-                torch.ones_like(features1_sim), 
+                torch.ones_like(features1_sim),
                 1,
-                #Creates a tensor filled with ones that has the same shape as features1_sim. This serves as the base tensor where updates will be made.
-                torch.arange(features1_sim.size(0)).view(-1, 1).cuda(non_blocking=True), # view(-1, 1) Reshapes the tensor into a 2D column vector with shape (features1_sim.size(0), 1)
-                0 
-                #Generates a 1D tensor containing sequential integers from 0 to features1_sim.size(0) - 1.
-                #Example: If features1_sim.size(0) is 5, this will create torch.tensor([0, 1, 2, 3, 4]).
+                torch.arange(features1_sim.size(0)).view(-1, 1).cuda(non_blocking=True),
+                0
             )
             logits_max1, _ = torch.max(features1_sim * logits_mask, dim=1, keepdim=True)
-            #This operation creates a mask to exclude self-similarities when calculating similarity or distance metrics. 
-            # In a contrastive learning task, the diagonal (self-similarities) is ignored because a sample's similarity to itself is not meaningful when comparing with other samples.
             features1_sim = features1_sim - logits_max1.detach()
             row_size = features1_sim.size(0)
             logits1 = torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)) / torch.exp(features1_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
 
         # Asym SupCon
-        f1, f2 = torch.split(features, [bsz, bsz], dim=0) #f1 and f2 might be different augmentations of the same sample.
-        features1 = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1) #  each set is reshaped and combined so that every row in the batch now contains two feature vectors.
-        loss, loss_values = criterion(features1, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
-        #print("loss : ", loss)
-        #print("loss_values : ", loss_values)
-
-        # update buffer using Asym SupCon loss
-        device = conf.get_device()
-        #i1, i2 = torch.split(features, [bsz, bsz], dim=0) #let's not do this to not arbitrarily favor one augmentation over another
-        #let's duplicate labels instead
-        task = (torch.ones(labels.shape[0]) * opt.target_task).to(device, dtype=torch.long)
-        #print(f"images {images.shape} \t labels2 {labels.shape} \t task_labels {task.shape} \t logits {features.shape} \t loss_values {loss_values.shape}")
-        # add data to buffer
-        buffer.add_data(examples=images,
-                            #examples=i1,
-                            labels=labels.repeat(2),
-                            task_labels=task.repeat(2),
-                            logits=features,
-                            loss_values=loss_values)
+        f1, f2 = torch.split(features, [bsz, bsz], dim=0)
+        features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
+        loss, loss_values = criterion(features, labels, target_labels=list(range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task)))
 
         # IRD (past)
         if opt.target_task > 0:
@@ -413,7 +352,6 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
                 logits_max2, _ = torch.max(features2_sim*logits_mask, dim=1, keepdim=True)
                 features2_sim = features2_sim - logits_max2.detach()
                 logits2 = torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)) /  torch.exp(features2_sim[logits_mask.bool()].view(row_size, -1)).sum(dim=1, keepdim=True)
-
 
             loss_distill = (-logits2 * torch.log(logits1)).sum(1).mean()
             loss += opt.distill_power * loss_distill
@@ -427,13 +365,25 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
         loss.backward()
         optimizer.step()
 
+        #update buffer
+        if torch.cuda.is_available():
+            device = 'cuda'
+        else:
+            device = 'cpu'
+        task = (torch.ones(labels.shape[0]) * opt.target_task).to(device, dtype=torch.long)
+        if opt.target_task > 0:
+            buffer.add_data(examples=original_indices,
+                            labels=labels.repeat(2),
+                            task_labels=task.repeat(2),
+                            logits=features,
+                            loss_values=loss_values)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
         # print info
-        if (idx + 1) % opt.print_freq == 0 or idx+1 == len(train_loader):
+        if (idx + 1) % opt.print_freq == 0 or idx + 1 == len(train_loader):
             print('Train: [{0}][{1}/{2}]\t'
                   'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
@@ -464,9 +414,6 @@ def main():
     model2, _ = set_model(opt)
     model2.eval()
 
-    print(" DEBUG num gpus :", torch.cuda.device_count())
-    #initialize buffer
-    #device = conf.get_device()
     if torch.cuda.is_available():
         device = 'cuda'
         if opt.cuda_debug :
@@ -482,15 +429,27 @@ def main():
     # build optimizer
     optimizer = set_optimizer(opt, model)
 
+    replay_indices = None
+
     if opt.resume_target_task is not None:
-        load_file = os.path.join(opt.save_folder, 'last_loss_buffer_{target_task}.pth'.format(target_task=opt.resume_target_task))
+        load_file = os.path.join(opt.save_folder, 'last_{policy}_{target_task}.pth'.format(policy=opt.replay_policy ,target_task=opt.resume_target_task))
         model, optimizer = load_model(model, optimizer, load_file)
-        buffer.load(
+        if opt.resume_target_task == 0:
+            replay_indices = []
+        else:
+           buffer.load(
             os.path.join(opt.log_folder, 'loss_buffer_{target_task}.pth'.format(target_task=target_task))
         )
-        print('number of buffered samples : ', buffer.num_examples)
+        print('number of buffered indices : ', buffer.num_indices)
 
     original_epochs = opt.epochs
+
+    if opt.end_task is not None:
+        if opt.resume_target_task is not None:
+            assert opt.end_task > opt.resume_target_task
+        opt.end_task = min(opt.end_task+1, opt.n_cls // opt.cls_per_task)
+    else:
+        opt.end_task = opt.n_cls // opt.cls_per_task
 
     for target_task in range(0 if opt.resume_target_task is None else opt.resume_target_task+1, opt.end_task):
 
@@ -499,14 +458,16 @@ def main():
 
         print('Start Training current task {}'.format(opt.target_task))
 
+        # acquire replay sample indices if available
+        if buffer is not None and opt.target_task > 0:
+            buffer_data = buffer.get_data(opt.buffer_size)
+            replay_indices = buffer_data[0]
+        else :
+            replay_indices = []
+
+
         # build data loader (dynamic: 0109)
-        train_loader, subset_indices = set_loader(opt, buffer)
-
-
-        np.save(
-          os.path.join(opt.log_folder, 'subset_indices_loss_buffer_{target_task}.npy'.format(target_task=target_task)),
-          np.array(subset_indices))
-
+        train_loader, subset_indices = set_loader(opt, replay_indices)
 
 
         # training routine
@@ -516,6 +477,7 @@ def main():
             opt.epochs = original_epochs
 
         for epoch in range(1, opt.epochs + 1):
+
             adjust_learning_rate(opt, optimizer, epoch)
 
             # train for one epoch
@@ -524,29 +486,24 @@ def main():
             time2 = time.time()
             print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
 
+            # tensorboard logger
             if opt.tensorboard:
-                # tensorboard logger
                 logger.log_value('loss_{target_task}'.format(target_task=target_task), loss, epoch)
                 logger.log_value('learning_rate_{target_task}'.format(target_task=target_task), optimizer.param_groups[0]['lr'], epoch)
 
-
-        ####### END OF TASK ##########
         # save the last model
         save_file = os.path.join(
-            opt.save_folder, 'last_loss_buffer_{target_task}.pth'.format(target_task=target_task))
+            opt.save_folder, 'last_{policy}_{target_task}.pth'.format(policy=opt.replay_policy ,target_task=target_task))
         save_model(model, optimizer, opt, opt.epochs, save_file)
 
         # save buffered samples
         buffer.save(os.path.join(opt.log_folder, 'loss_buffer_{target_task}.pth'.format(target_task=target_task)))
 
-        #if opt.reset_bins :
         #reset buffer bins
         buffer.reset_bins()
 
     if opt.tensorboard:
         tensorboard_writer.close()
 
-
 if __name__ == '__main__':
-    # torch.multiprocessing.set_start_method('spawn', force=True)
     main()

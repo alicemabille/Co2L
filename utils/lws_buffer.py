@@ -121,7 +121,6 @@ class Buffer(Dataset):
 
     def init_tensors(self, examples: torch.Tensor, labels: torch.Tensor,
                      logits: torch.Tensor, task_labels: torch.Tensor,
-                     clusters_labels=None, clusters_logits=None,
                      loss_values=None) -> None:
         for attr_str in self.attributes:
             attr = eval(attr_str)
@@ -134,11 +133,11 @@ class Buffer(Dataset):
                     setattr(self, attr_str, torch.zeros((self.buffer_size,
                                                          *attr.shape[1:]), dtype=typ, device=self.device))
 
-    def add_data(self, examples, labels=None, clusters_labels=None, logits=None, clusters_logits=None, task_labels=None, loss_values=None):
+    def add_data(self, examples, labels=None, logits=None, task_labels=None, loss_values=None):
         if torch.cuda.is_available() and self.cuda_debug_mode:
             print(f"buffer CUDA device: {torch.cuda.current_device()}")
         if not hasattr(self, 'examples'):
-            self.init_tensors(examples, labels, logits, task_labels, clusters_labels=clusters_labels, clusters_logits=clusters_logits, loss_values=loss_values)
+            self.init_tensors(examples, labels, logits, task_labels, loss_values=loss_values)
         rix = []
         for i in range(examples.shape[0]):
             index = self.reservoir_bin_loss(loss_values[i]) #choosing which samples to store
@@ -155,18 +154,10 @@ class Buffer(Dataset):
                     if self.labels.device != self.device:
                         self.labels.to(self.device)
                     self.labels[index] = labels[i].to(self.device)
-                if clusters_labels is not None:
-                    if self.clusters_labels.device != self.device:
-                        self.clusters_labels.to(self.device)
-                    self.clusters_labels[index] = clusters_labels[i].to(self.device)
                 if logits is not None:
                     if self.logits.device != self.device:
                         self.logits.to(self.device)
                     self.logits[index] = logits[i].to(self.device)
-                if clusters_logits is not None:
-                    if self.clusters_logits.device != self.device:
-                        self.clusters_logits.to(self.device)
-                    self.clusters_logits[index] = clusters_logits[i].to(self.device)
                 if task_labels is not None:
                     if self.task_labels.device != self.device:
                         self.task_labels.to(self.device)
@@ -188,7 +179,7 @@ class Buffer(Dataset):
     def get_task_labels(self):
         return self.task_labels.cpu().numpy()
 
-    def get_data(self, size: int, transform: transforms = None, return_index=False, to_device=None) -> Tuple:
+    def get_data(self, size: int, return_index=False, to_device=None) -> Tuple:
         """
         Get data from the buffer at random indices.
         """
@@ -201,36 +192,14 @@ class Buffer(Dataset):
         # random indices
         choice = np.random.choice(m_t, size=size, replace=False)
 
-        if transform is None:
-            def transform(x): return x
-        # transformed buffered samples of random indices
-        augmented_data = apply_transform(self.examples[choice], transform=transform)
-        """if hasattr(self, 'labels'):
-            print('buffer has stored labels')
-            augmented_data = apply_transform(self.examples[choice], transform=transform, y=getattr(self, 'labels'))"""
-
-        # if augmented data has modified labels (ex with TwoCropTransform: double the data, double the labels)
-        if isinstance(augmented_data, tuple) :
-            ret_tuple = (augmented_data[0].to(target_device),)
-            double = True
-        else : # base case
-            ret_tuple = (augmented_data.to(target_device),)
-            double = False
+        ret_tuple = (self.examples[choice].to(target_device),)
         #print('ret_tuple = ', ret_tuple)
 
         for attr_str in self.attributes[1:]:
             if hasattr(self, attr_str):
                 print(f'adding {attr_str} attribute to buffer get_data() return tuple')
-                if attr_str=='labels' and double: #and isinstance(augmented_data, tuple) :
-                    #print('replacing buffer labels with augmented labels')
-                    #attr = augmented_data[1].to(target_device) # labels of augmented data
-                    print('doubling labels')
-                    attr = getattr(self, attr_str).to(target_device)
-                    ret_attr = attr[choice].repeat(2)
-                    ret_tuple += (ret_attr,)
-                else :
-                    attr = getattr(self, attr_str).to(target_device)
-                    ret_tuple += (attr[choice],)
+                attr = getattr(self, attr_str).to(target_device)
+                ret_tuple += (attr[choice],)
 
         if not return_index:
             return ret_tuple

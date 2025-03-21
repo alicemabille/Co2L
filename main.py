@@ -231,22 +231,23 @@ def set_replay_samples(opt, model, prev_indices=None):
         prev_indices = []
         observed_classes = list(range(0, opt.target_task*opt.cls_per_task))
     else:
+        # removing samples from previous tasks with equal probability for each class
         shrink_size = ((opt.target_task - 1) * opt.mem_size / opt.target_task)
         if len(prev_indices) > 0:
             unique_cls = np.unique(val_targets[prev_indices]) #distinct classes
             _prev_indices = prev_indices #storing old prev_indices
             prev_indices = []
 
-            for c in unique_cls:
-                mask = val_targets[_prev_indices] == c
-                size_for_c = shrink_size / len(unique_cls)
-                p = size_for_c - (shrink_size // len(unique_cls))
+            for c in unique_cls: 
+                mask = val_targets[_prev_indices] == c #mask for class c
+                size_for_c = shrink_size / len(unique_cls) #buffer size for class c
+                p = size_for_c - (shrink_size // len(unique_cls)) #probability for rounding up
                 if random.random() < p:
                     size_for_c = math.ceil(size_for_c)
                 else:
                     size_for_c = math.floor(size_for_c)
 
-                # dataset is built as a union of current task samples and buffered samples, without any oversampling
+                # constructing list of kept buffered samples
                 prev_indices += torch.tensor(_prev_indices)[mask][torch.randperm(mask.sum())[:size_for_c]].tolist()
 
             print(np.unique(val_targets[prev_indices], return_counts=True))
@@ -263,7 +264,7 @@ def set_replay_samples(opt, model, prev_indices=None):
     val_observed_targets = val_targets[observed_indices]
     val_unique_cls = np.unique(val_observed_targets)
 
-
+    # choosing which samples from current task to store in the buffer
     selected_observed_indices = []
     for c_idx, c in enumerate(val_unique_cls):
         size_for_c_float = ((opt.mem_size - len(prev_indices) - len(selected_observed_indices)) / (len(val_unique_cls) - c_idx))
@@ -279,6 +280,7 @@ def set_replay_samples(opt, model, prev_indices=None):
 
     model.is_training = is_training
 
+    # dataset is built as a union of current task samples and buffered samples, without any oversampling
     return prev_indices + selected_observed_indices
 
 
