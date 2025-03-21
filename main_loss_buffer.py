@@ -43,6 +43,7 @@ def parse_option():
     parser.add_argument('--replay_policy', type=str, choices=['random'], default='random')
 
     parser.add_argument('--mem_size', type=int, default=200)
+    parser.add_argument('--n_bin', type=int, default=4) #buffer bins
 
     parser.add_argument('--cls_per_task', type=int, default=2)
 
@@ -104,6 +105,8 @@ def parse_option():
                         help='id for recording multiple runs')
     parser.add_argument('--tensorboard', action='store_true',
                 help='use tensorboard for logging and visualization')
+    parser.add_argument('--cuda_debug', action='store_true',
+                    help='activate CUDA device prints to terminal')
 
     opt = parser.parse_args()
 
@@ -297,14 +300,20 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
     for idx, (images, labels) in enumerate(train_loader):
         data_time.update(time.time() - end)
 
-        # Compute original dataset indices
+        # Compute original dataset indices as a tensor
         if isinstance(train_loader.dataset, Subset):
-            original_indices = [train_loader.dataset.indices[i] for i in range(idx * opt.batch_size, min((idx + 1) * opt.batch_size, len(train_loader.dataset)))]
+            original_indices = torch.tensor(
+                train_loader.dataset.indices[idx * opt.batch_size: min((idx + 1) * opt.batch_size, len(train_loader.dataset))],
+                dtype=int
+            )
         else:
-            original_indices = list(range(idx * opt.batch_size, min((idx + 1) * opt.batch_size, len(train_loader.dataset))))
+            original_indices = torch.arange(
+                idx * opt.batch_size, min((idx + 1) * opt.batch_size, len(train_loader.dataset)),
+                dtype=int
+            )
 
         # Log or use the original indices as needed
-        print(f"Batch {idx + 1}: Original dataset indices: {original_indices}")
+        #print(f"Batch {idx + 1}: Original dataset indices: {original_indices}")
 
         images = torch.cat([images[0], images[1]], dim=0)
         if torch.cuda.is_available():
@@ -371,12 +380,11 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
         else:
             device = 'cpu'
         task = (torch.ones(labels.shape[0]) * opt.target_task).to(device, dtype=torch.long)
-        if opt.target_task > 0:
-            buffer.add_data(examples=original_indices,
-                            labels=labels.repeat(2),
-                            task_labels=task.repeat(2),
-                            logits=features,
-                            loss_values=loss_values)
+        buffer.add_data(examples=original_indices,
+                        labels=labels.repeat(2),
+                        task_labels=task.repeat(2),
+                        logits=features,
+                        loss_values=loss_values)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -440,7 +448,7 @@ def main():
            buffer.load(
             os.path.join(opt.log_folder, 'loss_buffer_{target_task}.pth'.format(target_task=target_task))
         )
-        print('number of buffered indices : ', buffer.num_indices)
+        print('number of buffered indices : ', buffer.num_examples)
 
     original_epochs = opt.epochs
 
@@ -460,8 +468,12 @@ def main():
 
         # acquire replay sample indices if available
         if buffer is not None and opt.target_task > 0:
-            buffer_data = buffer.get_data(opt.buffer_size)
-            replay_indices = buffer_data[0]
+            buffer_data = buffer.get_data(opt.mem_size)
+            replay_indices = buffer_data[0].tolist()
+            print('replay_indices type: ', type(replay_indices))
+            print('replay_indices length: ', len(replay_indices))
+            print('replay_indices first element: ', replay_indices[0])
+            print('replay_indices first element type: ', type(replay_indices[0]))
         else :
             replay_indices = []
 
@@ -493,7 +505,7 @@ def main():
 
         # save the last model
         save_file = os.path.join(
-            opt.save_folder, 'last_{policy}_{target_task}.pth'.format(policy=opt.replay_policy ,target_task=target_task))
+            opt.save_folder, 'last_loss_buffer_{target_task}.pth'.format(target_task=target_task))
         save_model(model, optimizer, opt, opt.epochs, save_file)
 
         # save buffered samples
