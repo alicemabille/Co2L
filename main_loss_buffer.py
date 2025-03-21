@@ -209,7 +209,34 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
             target_class_indices = np.where(np.array(_train_dataset.targets) == tc)[0]
             subset_indices += np.where(np.array(_train_dataset.targets) == tc)[0].tolist()
 
-        train_dataset = Subset(_train_dataset, subset_indices)
+        # Add buffer data if available
+        if buffer is not None and opt.target_task > 0:
+           # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
+           # change buffer data from (N, H, W, C) to (N, C, H, W) to match dataset
+            buffer_data = buffer.get_data(opt.mem_size, transform=PermuteDims())
+            #print('number of buffered samples : ', buffer.num_examples)
+            data = buffer_data[0].detach().clone()
+            targets = buffer_data[1].detach().clone()
+            # Assert that data and targets are tensors
+            assert isinstance(data, torch.Tensor), "Data is not a tensor"
+            assert isinstance(targets, torch.Tensor), "Targets are not tensors"
+            #print('shape of buffer data : ', buffer_images.shape)
+            #print('shape of buffer labels : ', buffer_labels.shape)
+            buffer_dataset = torch.utils.data.TensorDataset(data, targets)
+            
+            #print('Train dataset image shapes:', [img.shape for img in _train_dataset.data[:10]], 'types :', [type(img) for img in _train_dataset.data[:10]])
+            print('max dataset image size : ', max([img.shape for img in _train_dataset.data]))
+            print('min dataset image size : ', min([img.shape for img in _train_dataset.data]))
+            print('Buffer dataset images shape:', buffer_dataset.tensors[0].shape)
+            print('Buffer dataset targets shape:', buffer_dataset.tensors[1].shape)
+            print('Train dataset first targets:', _train_dataset.targets[:10])
+            train_dataset = torch.utils.data.ConcatDataset([Subset(_train_dataset, subset_indices), buffer_dataset])
+            print(train_dataset)
+            #print('Concatenated dataset image shapes:', train_dataset.tensors[0].shape)
+            #print('Concatenated dataset targets:', train_dataset.tensors[1].shape)
+
+        else:
+            train_dataset = Subset(_train_dataset, subset_indices)
 
         print('Dataset size: {}'.format(len(subset_indices)))
         uk, uc = np.unique(np.array(_train_dataset.targets)[subset_indices], return_counts=True)
@@ -224,7 +251,23 @@ def set_loader(opt:argparse.Namespace, buffer:Buffer=None):
             target_class_indices = np.where(_train_dataset.targets == tc)[0]
             subset_indices += np.where(_train_dataset.targets == tc)[0].tolist()
 
-        train_dataset = Subset(_train_dataset, subset_indices)
+        # Add buffer data if available
+        if buffer is not None and opt.target_task > 0:
+           # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
+            #buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor))) #don't do this : buffered samples are already augmented !
+            buffer_data = buffer.get_data(opt.mem_size, transform=PermuteDims)
+            print('shape of buffer data : ', buffer_data[0].shape)
+            print('shape of buffer labels : ', buffer_data[1].shape)
+            print('number of buffered samples : ', buffer.num_examples)
+             # change buffer data from (N, H, W, C) to (N, C, H, W) to match dataset
+            buffer_images = buffer_data[0]
+            buffer_dataset = torch.utils.data.TensorDataset(buffer_images, buffer_data[1]) 
+            
+            print('Train dataset image shapes:', [img.shape for img in _train_dataset.data[:10]])
+            print('Buffer dataset image shapes:', [img.shape for img in buffer_images[:10]])
+            train_dataset = torch.utils.data.ConcatDataset([Subset(_train_dataset, subset_indices), buffer_dataset])
+        else:
+            train_dataset = Subset(_train_dataset, subset_indices)
 
         print('Dataset size: {}'.format(len(subset_indices)))
         uk, uc = np.unique(np.array(_train_dataset.targets)[subset_indices], return_counts=True)
@@ -299,23 +342,13 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
         #print("labels tensor : ",labels.shape) #labels tensor :  torch.Size([272])
         bsz = labels.shape[0]
 
-        # Add buffer data if available
-        if buffer is not None and opt.target_task > 0:
-           # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
-           # change buffer data from (N, H, W, C) to (N, C, H, W) to match dataset
-            buffer_data = buffer.get_data(opt.mem_size/opt.batchsize)
-            data = buffer_data[0]
-            targets = buffer_data[1]
-            images = torch.cat([images[0], data], dim=0)
-            labels = torch.cat([labels, targets], dim=0)
-
         with torch.no_grad():
             prev_task_mask = labels < opt.target_task * opt.cls_per_task
             prev_task_mask = prev_task_mask.repeat(2)
 
 
         # warm-up learning rate
-        warmup_learning_rate(opt, epoch, idx, len(train_loader)+opt.mem_size, optimizer)
+        warmup_learning_rate(opt, epoch, idx, len(train_loader), optimizer)
 
         # compute loss
         features, encoded = model(images, return_feat=True)
@@ -422,6 +455,7 @@ def main():
     model2, _ = set_model(opt)
     model2.eval()
 
+    print(" DEBUG num gpus :", torch.cuda.device_count())
     #initialize buffer
     #device = conf.get_device()
     if torch.cuda.is_available():
