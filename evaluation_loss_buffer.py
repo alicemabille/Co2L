@@ -22,7 +22,6 @@ from utils.util import adjust_learning_rate, warmup_learning_rate, accuracy
 from utils.util import set_optimizer
 
 from networks.resnet_big import SupConResNet, LinearClassifier
-from torch.utils.tensorboard import SummaryWriter
 
 
 def parse_option():
@@ -71,6 +70,8 @@ def parse_option():
                         help='path to pre-trained model')
     parser.add_argument('--logpt', type=str, default='',
                         help='path to logs')
+    parser.add_argument('--tensorboard', action='store_true',
+                    help='use tensorboard for logging and visualization')
 
     opt = parser.parse_args()
 
@@ -290,8 +291,11 @@ def main():
     optimizer = set_optimizer(opt, classifier)
     print( optimizer.param_groups[0]['lr'])
 
-    # tensorboard
-    writer = SummaryWriter(log_dir=opt.tb_folder)
+    ########################## TENSORBOARD #############################
+    if opt.tensorboard:
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(log_dir=opt.tb_folder)
+    ####################################################################
 
     # training routine
     for epoch in range(1, opt.epochs + 1):
@@ -315,7 +319,8 @@ def main():
         for cls, (cr, c) in enumerate(zip(val_corr, val_cnt)):
             if c > 0:
                 val_acc_stats[str(cls)] = cr / c * 100.
-        writer.add_scalars('val_acc', val_acc_stats, epoch)
+        if opt.tensorboard:
+            writer.add_scalars('val_acc', val_acc_stats, epoch)
 
     with open(os.path.join(opt.origin_ckpt, 'acc_buffer_{}.txt'.format(opt.target_task)), 'w') as f:
         out = 'best accuracy: {:.2f}\n'.format(best_acc)
