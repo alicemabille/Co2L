@@ -331,6 +331,15 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
     for idx, (images, labels) in enumerate(train_loader):
 
         data_time.update(time.time() - end)
+        im0 = images[0]
+        im1 = images[1]
+
+        print("####### DEBUG ###### length of im0 : ", len(im0),"\n")
+        print("####### DEBUG ###### length of im1 : ", len(im1),"\n")
+
+        print("####### DEBUG ###### labels type : ", type(labels))
+        print("####### DEBUG ###### length of labels : ", len(labels),"\n")
+        print("####### DEBUG ###### labels 0 type : ", type(labels[0]),"\n")
 
         images = torch.cat([images[0], images[1]], dim=0) # two augmentations of the same image : images[0] has the first augmentations, images[1] has the second augmentations
         if torch.cuda.is_available():
@@ -539,5 +548,5 @@ def main():
 
 
 if __name__ == '__main__':
-    torch.multiprocessing.set_start_method('spawn', force=True)
+    # torch.multiprocessing.set_start_method('spawn', force=True)
     main()

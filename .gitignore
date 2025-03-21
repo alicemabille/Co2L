@@ -19,3 +19,4 @@ buffer_test.py
 *.code-workspace
 *.pyc
 /tests
+*.json
