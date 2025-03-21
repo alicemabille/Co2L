@@ -67,6 +67,8 @@ def parse_option():
                         help='path to pre-trained model')
     parser.add_argument('--logpt', type=str, default='',
                         help='path to pre-trained model')
+    parser.add_argument('--tensorboard', action='store_true',
+                help='use tensorboard for logging and visualization')
 
     opt = parser.parse_args()
 
