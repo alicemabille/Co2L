@@ -380,11 +380,12 @@ def train(train_loader:torch.utils.data.DataLoader, model:nn.Module, model2:nn.M
         else:
             device = 'cpu'
         task = (torch.ones(labels.shape[0]) * opt.target_task).to(device, dtype=torch.long)
-        buffer.add_data(examples=original_indices,
-                        labels=labels.repeat(2),
-                        task_labels=task.repeat(2),
-                        logits=features,
-                        loss_values=loss_values)
+        if epoch > 5 :
+            buffer.add_data(examples=original_indices,
+                            labels=labels.repeat(2),
+                            task_labels=task.repeat(2),
+                            logits=features,
+                            loss_values=loss_values)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -469,7 +470,7 @@ def main():
         # acquire replay sample indices if available
         if buffer is not None and opt.target_task > 0:
             buffer_data = buffer.get_data(opt.mem_size)
-            replay_indices = buffer_data[0].tolist()
+            replay_indices = buffer_data[0].to(torch.int).tolist()
             print('replay_indices type: ', type(replay_indices))
             print('replay_indices length: ', len(replay_indices))
             print('replay_indices first element: ', replay_indices[0])

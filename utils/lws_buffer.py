@@ -71,10 +71,14 @@ class Buffer(Dataset):
         """
         Determines the bin index for a given loss value.
         """
+        assert not loss_value.isnan()
+
         bin_range = self.max_loss - self.min_loss
         if bin_range == 0:
             return 0  # All losses are the same, only one bin needed
         bin_width = bin_range / self.num_bins
+        assert bin_width != 0
+        
         bin_index = int((loss_value - self.min_loss) / bin_width)
         #print(f'loss {loss_value}, bin {bin_index}, width {bin_width}')
         return min(bin_index, self.num_bins - 1)  # To handle the max loss
@@ -83,6 +87,7 @@ class Buffer(Dataset):
         """
         Modified reservoir sampling algorithm considering loss values and binning.
         """
+        assert not loss_value.isnan()
         self.update_loss_range(loss_value)
         bin_index = self.get_bin_index(loss_value)
 
@@ -271,128 +276,6 @@ class Buffer(Dataset):
         for attr_str in self.attributes:
             if hasattr(self, attr_str):
                 setattr(self, attr_str, getattr(self, attr_str).to(self.device))
-
-def set_loader(opt, buffer:Buffer=None):
-    # construct data loader
-    if opt.dataset == 'cifar10':
-        mean = (0.4914, 0.4822, 0.4465)
-        std = (0.2023, 0.1994, 0.2010)
-    elif opt.dataset == 'tiny-imagenet':
-        mean = (0.4802, 0.4480, 0.3975)
-        std = (0.2770, 0.2691, 0.2821)
-    else:
-        raise ValueError('dataset not supported: {}'.format(opt.dataset))
-
-
-    normalize = transforms.Normalize(mean=mean, std=std)
-    train_transform = transforms.Compose([
-        transforms.Resize(size=(opt.size, opt.size)),
-        transforms.RandomResizedCrop(size=opt.size, scale=(0.1 if opt.dataset=='tiny-imagenet' else 0.2, 1.)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([transforms.GaussianBlur(kernel_size=opt.size//20*2+1, sigma=(0.1, 2.0))], p=0.5 if opt.size>32 else 0.0),
-        transforms.ToTensor(),
-        normalize,
-    ])
-    val_transform = transforms.Compose([
-        transforms.Resize(size=(opt.size,opt.size)),
-        transforms.ToTensor(),
-        normalize,
-    ])
-
-    target_classes = list(range(0, (opt.target_task+1)*opt.cls_per_task)) # tasks learned so far.
-
-    if opt.dataset == 'cifar10':
-        subset_indices = []
-        _train_dataset = datasets.CIFAR10(root=opt.data_folder,
-                                         transform=train_transform,
-                                         download=True)
-
-        _train_targets = np.array(_train_dataset.targets)
-        for tc in range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task):
-            subset_indices += np.where(np.array(_train_dataset.targets) == tc)[0].tolist()
-
-        ut, uc = np.unique(_train_targets[subset_indices], return_counts=True)
-        print(ut)
-        print(uc)
-
-        weights = np.array([0.] * len(subset_indices))
-        for t, c in zip(ut, uc):
-            weights[_train_targets[subset_indices] == t] = 1./c
-
-        # Add buffer data if available
-        if buffer is not None and opt.target_task > 0:
-            # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
-            #buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor))) #don't do this : buffered samples are already augmented !
-            buffer_data = buffer.get_data(opt.mem_size)
-            print('shape of buffer data : ', buffer_data[0].shape)
-            print('shape of buffer labels : ', buffer_data[1].shape)
-            print('number of buffered samples : ', buffer.num_examples)
-            buffer_dataset = torch.utils.data.TensorDataset(buffer_data[0], buffer_data[1]) 
-            train_dataset = torch.utils.data.ConcatDataset([Subset(_train_dataset, subset_indices), buffer_dataset])
-        else :
-            train_dataset =  Subset(_train_dataset, subset_indices)
-
-        subset_indices = []
-        _val_dataset = datasets.CIFAR10(root=opt.data_folder,
-                                       train=False,
-                                       transform=val_transform)
-        for tc in target_classes:
-            subset_indices += np.where(np.array(_val_dataset.targets) == tc)[0].tolist()
-        val_dataset =  Subset(_val_dataset, subset_indices)
-
-    elif opt.dataset == 'tiny-imagenet':
-        subset_indices = []
-        _train_dataset = TinyImagenet(root=opt.data_folder,
-                                         transform=train_transform,
-                                         download=True)
-
-        _train_targets = np.array(_train_dataset.targets)
-        for tc in range(opt.target_task*opt.cls_per_task, (opt.target_task+1)*opt.cls_per_task):
-            subset_indices += np.where(np.array(_train_dataset.targets) == tc)[0].tolist()
-         # Add buffer data if available
-        if buffer is not None and opt.target_task > 0:
-            # 0 is samples, 1 is labels, 2 is logits, 3 is task labels, 4 is loss values
-            #buffer_data = buffer.get_data(opt.mem_size, transform=TwoCropTransform(transform(opt=opt, type=torch.Tensor))) #don't do this : buffered samples are already augmented !
-            buffer_data = buffer.get_data(opt.mem_size)
-            print('shape of buffer data : ', buffer_data[0].shape)
-            print('shape of buffer labels : ', buffer_data[1].shape)
-            print('number of buffered samples : ', buffer.num_examples)
-            buffer_dataset = torch.utils.data.TensorDataset(buffer_data[0], buffer_data[1]) 
-            train_dataset = torch.utils.data.ConcatDataset([Subset(_train_dataset, subset_indices), buffer_dataset])
-            # subset_indices += ?
-        else :
-            train_dataset =  Subset(_train_dataset, subset_indices)
-
-        weights = np.array([0.] * len(subset_indices))
-        for t, c in zip(ut, uc):
-            weights[_train_targets[subset_indices] == t] = 1./c
-
-
-        subset_indices = []
-        _val_dataset = TinyImagenet(root=opt.data_folder,
-                                       train=False,
-                                       transform=val_transform)
-        for tc in target_classes:
-            subset_indices += np.where(np.array(_val_dataset.targets) == tc)[0].tolist()
-        val_dataset =  Subset(_val_dataset, subset_indices)
-
-    else:
-        raise ValueError(opt.dataset)
-
-    train_sampler = WeightedRandomSampler(torch.Tensor(weights), len(weights))
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=opt.batch_size, shuffle=(train_sampler is None),
-        num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler)
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=256, shuffle=False,
-        num_workers=8, pin_memory=True)
-
-    return train_loader, val_loader
-
 
 class PermuteDims(object):
     """
