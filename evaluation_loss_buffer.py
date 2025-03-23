@@ -120,7 +120,7 @@ def parse_option():
 
 
     opt.origin_ckpt = opt.ckpt
-    opt.ckpt = os.path.join(opt.ckpt, 'last_loss_buffer_{target_task}.pth'.format(target_task=opt.target_task))
+    opt.ckpt = os.path.join(opt.ckpt, 'last_{target_task}.pth'.format(target_task=opt.target_task))
     return opt
 
 
