@@ -21,3 +21,4 @@ buffer_test.py
 /tests
 *.json
 /buffer_data
+results
