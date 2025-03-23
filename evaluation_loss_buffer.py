@@ -283,7 +283,7 @@ def main():
         else:
             buffer.load(os.path.join(opt.logpt, f'loss_buffer_{opt.target_task}.pth'))
             buffer_data = buffer.get_data(opt.mem_size)
-            replay_indices = buffer_data[0].to(torch.int).tolist()
+            replay_indices = buffer_data[0].to(torch.int)
             print('replay_indices type: ', type(replay_indices))
             print('replay_indices length: ', len(replay_indices))
             print('replay_indices first element: ', replay_indices[0])
