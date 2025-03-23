@@ -40,7 +40,7 @@ def parse_option():
 
     parser.add_argument('--end_task', type=int, default=None)
 
-    parser.add_argument('--replay_policy', type=str, choices=['random'], default='random')
+    parser.add_argument('--replay_policy', type=str, choices=['loss','random'], default='loss')
 
     parser.add_argument('--mem_size', type=int, default=200)
     parser.add_argument('--n_bin', type=int, default=4) #buffer bins
@@ -134,9 +134,6 @@ def parse_option():
     # set the path according to the environment
     if opt.data_folder is None:
         opt.data_folder = '~/data/'
-    """opt.model_path = './save_{}_{}/{}_models'.format(opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.tb_path = './save_{}_{}/{}_tensorboard'.format(opt.replay_policy, opt.mem_size, opt.dataset)
-    opt.log_path = './save_{}_{}/logs'.format(opt.replay_policy, opt.mem_size, opt.dataset)"""
 
     opt.model_path = '{}/save_{}_{}/{}_models'.format(opt.data_folder , opt.replay_policy, opt.mem_size, opt.dataset)
     opt.tb_path = '{}/save_{}_{}/{}_tensorboard'.format(opt.data_folder, opt.replay_policy, opt.mem_size, opt.dataset)
@@ -506,7 +503,7 @@ def main():
 
         # save the last model
         save_file = os.path.join(
-            opt.save_folder, 'last_loss_buffer_{target_task}.pth'.format(target_task=target_task))
+            opt.save_folder, 'last_{target_task}.pth'.format(target_task=target_task))
         save_model(model, optimizer, opt, opt.epochs, save_file)
 
         # save buffered samples
