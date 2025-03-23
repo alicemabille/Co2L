@@ -83,7 +83,7 @@ def parse_option():
     # model dataset
     parser.add_argument('--model', type=str, default='resnet18')
     parser.add_argument('--dataset', type=str, default='cifar10',
-                        choices=['cifar10', 'tiny-imagenet', 'path'], help='dataset')
+                        choices=['cifar10', 'celeba', 'tiny-imagenet', 'path'], help='dataset')
     parser.add_argument('--mean', type=str, help='mean of dataset in path in form of str tuple')
     parser.add_argument('--std', type=str, help='std of dataset in path in form of str tuple')
     parser.add_argument('--data_folder', type=str, default=None, help='path to custom dataset')
@@ -120,6 +120,10 @@ def parse_option():
     elif opt.dataset == 'tiny-imagenet':
         opt.n_cls = 200
         opt.cls_per_task = 20
+        opt.size = 64
+    elif opt.dataset == 'celeba':
+        opt.n_cls = 10177
+        opt.cls_per_task = 2544
         opt.size = 64
     else:
         pass
@@ -194,6 +198,9 @@ def set_loader(opt, replay_indices):
     elif opt.dataset == 'tiny-imagenet':
         mean = (0.4802, 0.4480, 0.3975)
         std = (0.2770, 0.2691, 0.2821)
+    elif opt.dataset == 'celeba':
+        mean = (0.5, 0.5, 0.5)
+        std = (0.5, 0.5, 0.5)
     elif opt.dataset == 'path':
         mean = eval(opt.mean)
         std = eval(opt.mean)
@@ -244,6 +251,21 @@ def set_loader(opt, replay_indices):
             target_class_indices = np.where(_train_dataset.targets == tc)[0]
             subset_indices += np.where(_train_dataset.targets == tc)[0].tolist()
 
+        subset_indices += replay_indices
+
+        train_dataset =  Subset(_train_dataset, subset_indices)
+        print('Dataset size: {}'.format(len(subset_indices)))
+        uk, uc = np.unique(np.array(_train_dataset.targets)[subset_indices], return_counts=True)
+        print(uc[np.argsort(uk)])
+
+    elif opt.dataset == 'celeba':
+        subset_indices = []
+        _train_dataset = datasets.CelebA(root='{}/datasets'.format(opt.data_folder),
+                                        split='train',
+                                        target_type='identity',
+                                        transform=TwoCropTransform(train_transform),
+                                        download=True)
+        
         subset_indices += replay_indices
 
         train_dataset =  Subset(_train_dataset, subset_indices)
