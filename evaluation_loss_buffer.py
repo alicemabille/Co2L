@@ -278,12 +278,22 @@ def main():
                             n_bin=opt.n_bin)
 
     if opt.target_task is not None:
-        if opt.target_task > 0:
+        if opt.target_task == 0:
+            replay_indices = np.array([])
+        else:
             buffer.load(os.path.join(opt.logpt, f'loss_buffer_{opt.target_task}.pth'))
-        print('number of buffered samples : ', buffer.num_examples)
+            buffer_data = buffer.get_data(opt.mem_size)
+            replay_indices = buffer_data[0].to(torch.int).tolist()
+            print('replay_indices type: ', type(replay_indices))
+            print('replay_indices length: ', len(replay_indices))
+            print('replay_indices first element: ', replay_indices[0])
+            print('replay_indices first element type: ', type(replay_indices[0]))
+            print('number of buffered samples : ', buffer.num_examples)
+
+    print('number of samples to replay : ', len(replay_indices))
 
     # build data loader
-    train_loader, val_loader = set_loader(opt, buffer)
+    train_loader, val_loader, cls_num_list = set_loader(opt, replay_indices)
 
     # build model and criterion
     model, classifier, criterion = set_model(opt)

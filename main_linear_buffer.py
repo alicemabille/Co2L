@@ -277,7 +277,7 @@ def main():
         if opt.target_task == 0:
             replay_indices = np.array([])
         else:
-            replay_indices = np.load(opt.logpt)
+            replay_indices = np.load(opt.logpt) #only loading the replay indices for current task
         print('number of samples to replay : ', len(replay_indices))
 
     # build data loader
