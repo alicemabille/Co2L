@@ -177,9 +177,6 @@ def train(train_loader, model, classifier, criterion, optimizer, epoch, opt):
         output = classifier(features.detach()) #detach to train only the classifier without computing gradient of ResNet's parameters
         loss = criterion(output, labels)
 
-        print("predictions :",output.argmax(1))
-        print("labels :",labels)
-
         # update metric
         losses.update(loss.item(), bsz)
         acc += (output.argmax(1) == labels).float().sum().item()
@@ -196,6 +193,8 @@ def train(train_loader, model, classifier, criterion, optimizer, epoch, opt):
 
         # print info
         if (idx + 1) % opt.print_freq == 0:
+            print("predictions :",output.argmax(1))
+            print("labels :",labels)
             print('Train: [{0}][{1}/{2}]\t'
                   'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
