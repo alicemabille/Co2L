@@ -16,7 +16,8 @@ import torch
 import torch.backends.cudnn as cudnn
 
 from utils import conf
-from utils.lws_buffer import Buffer, set_loader
+from utils.lws_buffer import Buffer
+from utils.ce_buffer import set_loader
 from utils.util import AverageMeter
 from utils.util import adjust_learning_rate, warmup_learning_rate, accuracy
 from utils.util import set_optimizer
