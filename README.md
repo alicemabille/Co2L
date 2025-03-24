@@ -23,7 +23,7 @@ Different from other continual learning methods, Co^2L needs pre-training part f
 ## Representation Learning
 ### plain Co²L
 ```
-python main.py --batch_size 512 --model resnet18 --dataset cifar10 --mem_size 200 --epochs 100 --start_epoch 500 --learning_rate 0.5 --temp 0.5 --current_temp 0.2 --past_temp 0.01  --cosine --syncBN
+python main.py --batch_size 512 --model resnet18 --dataset cifar10 --mem_size 200 --epochs 100 --start_epoch 500 --learning_rate 0.5 --temp 0.5 --current_temp 0.2 --past_temp 0.01  --cosine
 ```
 ### Co²L with loss-bins-based buffer
 ```
