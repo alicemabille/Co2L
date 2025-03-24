@@ -318,8 +318,8 @@ def main():
         print(out)
         out += '\n'
         for k, v in val_acc_stats.items():
-            print(v)
-            out += '{}\n'.format(v)
+            print(k,' : ', v)
+            out += '{} : {}\n'.format(k,v)
         f.write(out)
 
     save_file = os.path.join(
