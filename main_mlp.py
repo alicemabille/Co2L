@@ -359,7 +359,7 @@ def set_loader(opt, replay_indices):
 
 
 def set_model(opt):
-    model = SupConResNet(name=opt.model)
+    model = SupConResNet(name=opt.model, extension='linear')
     criterion = SupConLoss(temperature=opt.temp)
 
     if torch.cuda.is_available():

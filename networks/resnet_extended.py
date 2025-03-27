@@ -163,7 +163,7 @@ class LinearBatchNorm(nn.Module):
 
 class SupConResNet(nn.Module):
     """backbone + projection head"""
-    def __init__(self, name='resnet50', head='mlp', feat_dim=128, extension_hidden_dim=128):
+    def __init__(self, name='resnet50', head='mlp', feat_dim=128, extension_hidden_dim=128, extension='mlp'):
         super(SupConResNet, self).__init__()
         model_fun, dim_in = model_dict[name]
         self.encoder:ResNet = model_fun()
@@ -179,14 +179,22 @@ class SupConResNet(nn.Module):
         else:
             raise NotImplementedError(
                 'head not supported: {}'.format(head))
-        self.predictor = nn.Sequential(
-            nn.Linear(feat_dim, extension_hidden_dim),
-            nn.BatchNorm1d(extension_hidden_dim),
-            nn.ReLU(inplace=True),                         # tester autre fct activation
-            nn.Linear(extension_hidden_dim, feat_dim),
-            nn.ReLU(inplace=True)
-
+        if extension == 'mlp':
+            self.predictor = nn.Sequential(
+                nn.Linear(feat_dim, extension_hidden_dim),
+                nn.BatchNorm1d(extension_hidden_dim),
+                nn.ReLU(inplace=True),                         # tester autre fct activation
+                nn.Linear(extension_hidden_dim, feat_dim),
+                nn.ReLU(inplace=True)
+            )
+        elif extension == 'linear':
+            self.predictor = nn.Sequential(
+                nn.Linear(feat_dim, extension_hidden_dim),
+                nn.ReLU(inplace=True),                         # tester autre fct activation
         )
+        else:
+            raise NotImplementedError(
+                'head not supported: {}'.format(extension))
 
     def reinit_head(self):
         for layers in self.head.children():
