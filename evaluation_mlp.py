@@ -122,7 +122,7 @@ def parse_option():
 
 
 def set_model(opt, cls_num_list):
-    model = SupConResNet(name=opt.model)
+    model = SupConResNet(name=opt.model, extension='mlp')
     criterion = torch.nn.CrossEntropyLoss()
     classifier = LinearClassifier(name=opt.model, num_classes=opt.n_cls)
 
