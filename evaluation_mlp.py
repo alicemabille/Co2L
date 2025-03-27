@@ -38,6 +38,7 @@ def parse_option():
                         help='num of workers to use')
     parser.add_argument('--epochs', type=int, default=100,
                         help='number of training epochs')
+    parser.add_argument('--extension', type=str, default='mlp')
 
     # optimization
     parser.add_argument('--learning_rate', type=float, default=0.1,
@@ -122,7 +123,7 @@ def parse_option():
 
 
 def set_model(opt, cls_num_list):
-    model = SupConResNet(name=opt.model, extension='mlp')
+    model = SupConResNet(name=opt.model, extension=opt.extension)
     criterion = torch.nn.CrossEntropyLoss()
     classifier = LinearClassifier(name=opt.model, num_classes=opt.n_cls)
 

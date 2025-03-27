@@ -83,6 +83,7 @@ def parse_option():
 
     # model dataset
     parser.add_argument('--model', type=str, default='resnet18')
+    parser.add_argument('--extension', type=str, default='mlp')
     parser.add_argument('--dataset', type=str, default='cifar10',
                         choices=['cifar10', 'tiny-imagenet', 'path'], help='dataset')
     parser.add_argument('--mean', type=str, help='mean of dataset in path in form of str tuple')
@@ -359,7 +360,7 @@ def set_loader(opt, replay_indices):
 
 
 def set_model(opt):
-    model = SupConResNet(name=opt.model, extension='mlp')
+    model = SupConResNet(name=opt.model, extension=opt.extension)
     criterion = SupConLoss(temperature=opt.temp)
 
     if torch.cuda.is_available():
